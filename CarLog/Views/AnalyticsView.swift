@@ -5,16 +5,18 @@ struct AnalyticsView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.carLogTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var metric: Int
     @State private var period = 0
     @State private var selectedMonth = Date()
+    @State private var selectedChartDate: Date?
 
     init(metric: Binding<Int> = .constant(0)) {
         _metric = metric
     }
 
     private struct Point: Identifiable {
-        let id = UUID()
+        var id: Date { date }
         let date: Date
         let value: Double
         var secondary: Double? = nil
@@ -35,7 +37,7 @@ struct AnalyticsView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .onChange(of: metric) { _, _ in period = 0 }
+                        .onChange(of: metric) { _, _ in period = 0; selectedChartDate = nil }
                         Picker("表示期間", selection: $period) {
                             ForEach(periodLabels.indices, id: \.self) { index in
                                 Text(periodLabels[index]).tag(index)
@@ -58,6 +60,10 @@ struct AnalyticsView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .environment(\.locale, Locale(identifier: "ja_JP"))
+        .environment(\.calendar, analysisCalendar)
+        .onChange(of: period) { _, _ in selectedChartDate = nil }
+        .onChange(of: selectedMonth) { _, _ in selectedChartDate = nil }
+        .onChange(of: store.selectedVehicle?.id) { _, _ in selectedChartDate = nil }
     }
 
     private var periodLabels: [String] { metric == 0 ? ["週間", "月間", "年間"] : ["月間", "年間"] }
@@ -154,49 +160,57 @@ struct AnalyticsView: View {
             } else if metric == 0 {
                 Chart(points) { point in
                     BarMark(x: .value("日付", point.date, unit: period == 2 ? .month : .day), y: .value("距離", point.value))
-                        .foregroundStyle(theme.accent.gradient).cornerRadius(3)
+                        .foregroundStyle(barColor(for: point, points: points, color: theme.accent).gradient).cornerRadius(3)
                 }
                 .chartXAxis { dateAxisMarks }
-                .chartYAxisLabel("走行距離（Km）").frame(height: 250)
+                .chartYAxis { numberAxisMarks }
+                .chartXScale(domain: selectedInterval.start...selectedInterval.end)
+                .chartOverlay { proxy in selectionOverlay(proxy, points: points) }
+                .chartYAxisLabel("走行距離（Km）").frame(height: 280)
             } else if metric == 1 {
                 Chart(points) { point in
-                    AreaMark(x: .value("日付", point.date), y: .value("燃費", point.value))
+                    AreaMark(x: .value("日付", plottedDate(point.date)), y: .value("燃費", point.value))
                         .foregroundStyle(LinearGradient(colors: [theme.accent.opacity(0.28), .clear], startPoint: .top, endPoint: .bottom))
-                    LineMark(x: .value("日付", point.date), y: .value("燃費", point.value)).foregroundStyle(theme.accent).lineStyle(.init(lineWidth: 3)).interpolationMethod(.catmullRom)
-                    PointMark(x: .value("日付", point.date), y: .value("燃費", point.value)).foregroundStyle(theme.accent).symbolSize(55)
+                    LineMark(x: .value("日付", plottedDate(point.date)), y: .value("燃費", point.value)).foregroundStyle(theme.accent).lineStyle(.init(lineWidth: 3)).interpolationMethod(.catmullRom)
+                    PointMark(x: .value("日付", plottedDate(point.date)), y: .value("燃費", point.value)).foregroundStyle(theme.accent).symbolSize(55)
                 }
                 .chartXAxis { dateAxisMarks }
-                .chartYAxisLabel("燃費（Km/L）").frame(height: 250)
+                .chartYAxis { numberAxisMarks }
+                .chartXScale(domain: selectedInterval.start...selectedInterval.end)
+                .chartOverlay { proxy in selectionOverlay(proxy, points: points) }
+                .chartYAxisLabel("燃費（Km/L）").frame(height: 280)
             } else {
                 Chart(points) { point in
-                    BarMark(x: .value("日付", point.date), y: .value("支払額", point.value)).foregroundStyle(fuelCostBarColor.gradient).cornerRadius(3)
+                    BarMark(x: .value("日付", point.date, unit: isYearlyPeriod ? .month : .day), y: .value("支払額", point.value)).foregroundStyle(barColor(for: point, points: points, color: fuelCostBarColor).gradient).cornerRadius(3)
                     if let secondary = point.secondary {
-                        LineMark(x: .value("日付", point.date), y: .value("単価", secondary * 30)).foregroundStyle(fuelUnitPriceColor).lineStyle(.init(lineWidth: 3)).interpolationMethod(.catmullRom)
-                        PointMark(x: .value("日付", point.date), y: .value("単価", secondary * 30)).foregroundStyle(fuelUnitPriceColor).symbolSize(65)
+                        LineMark(x: .value("日付", plottedDate(point.date)), y: .value("単価", secondary * 30)).foregroundStyle(fuelUnitPriceColor).lineStyle(.init(lineWidth: 3)).interpolationMethod(.catmullRom)
+                        PointMark(x: .value("日付", plottedDate(point.date)), y: .value("単価", secondary * 30)).foregroundStyle(fuelUnitPriceColor).symbolSize(65)
                     }
                 }
                 .chartYAxis {
-                    AxisMarks(position: .leading) { value in
+                    AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
                         AxisGridLine()
                         AxisTick()
                         AxisValueLabel {
                             if let amount = value.as(Double.self) {
-                                Text(amount.formatted(.number.precision(.fractionLength(0))))
+                                Text(amount.formatted(.number.precision(.fractionLength(0)))).font(.caption2.monospacedDigit())
                             }
                         }
                     }
-                    AxisMarks(position: .trailing) { value in
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
                         AxisTick()
                         AxisValueLabel {
                             if let scaledPrice = value.as(Double.self) {
-                                Text((scaledPrice / 30).formatted(.number.precision(.fractionLength(0))))
+                                Text((scaledPrice / 30).formatted(.number.precision(.fractionLength(0)))).font(.caption2.monospacedDigit())
                                     .foregroundStyle(fuelUnitPriceColor)
                             }
                         }
                     }
                 }
                 .chartXAxis { dateAxisMarks }
-                .frame(height: 250)
+                .chartXScale(domain: selectedInterval.start...selectedInterval.end)
+                .chartOverlay { proxy in selectionOverlay(proxy, points: points) }
+                .frame(height: 280)
                 HStack {
                     VStack(alignment: .leading, spacing: 5) {
                         Label("棒：支払額", systemImage: "rectangle.fill").foregroundStyle(fuelCostBarColor)
@@ -205,9 +219,13 @@ struct AnalyticsView: View {
                     Spacer()
                     VStack(alignment: .trailing, spacing: 5) {
                         Label("折れ線：1Lあたり", systemImage: "circle").foregroundStyle(fuelUnitPriceColor)
-                        Text("右の目盛り・円").foregroundStyle(fuelUnitPriceColor)
+                        Text("右の目盛り・円/L").foregroundStyle(fuelUnitPriceColor)
                     }
                 }.font(.caption)
+            }
+            if !points.isEmpty {
+                Label("グラフをタップして日付・数値を表示", systemImage: "hand.tap")
+                    .font(.caption).foregroundStyle(CarLogStyle.label)
             }
         }.carLogCard(padding: 16)
     }
@@ -259,20 +277,129 @@ struct AnalyticsView: View {
         }
     }
 
+    private func plottedDate(_ date: Date) -> Date {
+        let interval = analysisCalendar.dateInterval(of: isYearlyPeriod ? .month : .day, for: date)!
+        return interval.start.addingTimeInterval(interval.duration / 2)
+    }
+
+    private var axisDates: [Date] {
+        let calendar = analysisCalendar
+        let start = selectedInterval.start
+        if isYearlyPeriod {
+            let step = dynamicTypeSize.isAccessibilitySize ? 3 : 2
+            return stride(from: 0, to: 12, by: step).compactMap {
+                calendar.date(byAdding: .month, value: $0, to: start).map(plottedDate)
+            }
+        }
+        if metric == 0 && period == 0 {
+            let offsets = dynamicTypeSize.isAccessibilitySize ? [0, 3, 6] : Array(0..<7)
+            return offsets.compactMap { calendar.date(byAdding: .day, value: $0, to: start).map(plottedDate) }
+        }
+        let last = calendar.range(of: .day, in: .month, for: start)!.count
+        var days = dynamicTypeSize.isAccessibilitySize ? [1, 10, 20] : [1, 5, 10, 15, 20, 25]
+        days.removeAll { last - $0 < 4 }
+        days.append(last)
+        return days.compactMap { calendar.date(byAdding: .day, value: $0 - 1, to: start).map(plottedDate) }
+    }
+
     @AxisContentBuilder private var dateAxisMarks: some AxisContent {
-        AxisMarks(values: .stride(by: isYearlyPeriod ? .month : .day)) { value in
-            AxisGridLine()
+        AxisMarks(position: .bottom, values: axisDates) { value in
             AxisTick()
             AxisValueLabel {
                 if let date = value.as(Date.self) {
                     if isYearlyPeriod {
-                        Text(date, format: .dateTime.month())
+                        Text("\(analysisCalendar.component(.month, from: date))月")
+                            .font(.caption2.monospacedDigit()).lineLimit(1)
+                    } else if metric == 0 && period == 0 {
+                        VStack(spacing: 2) {
+                            Text("\(analysisCalendar.component(.month, from: date))/\(analysisCalendar.component(.day, from: date))")
+                            Text(date, format: .dateTime.weekday(.abbreviated)).foregroundStyle(CarLogStyle.label)
+                        }.font(.caption2.monospacedDigit()).fixedSize()
                     } else {
-                        Text(date, format: .dateTime.month().day())
+                        Text("\(analysisCalendar.component(.day, from: date))日")
+                            .font(.caption2.monospacedDigit()).lineLimit(1)
                     }
                 }
             }
         }
+    }
+
+    @AxisContentBuilder private var numberAxisMarks: some AxisContent {
+        AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+            AxisGridLine().foregroundStyle(CarLogStyle.border.opacity(0.5))
+            AxisTick()
+            AxisValueLabel {
+                if let number = value.as(Double.self) {
+                    Text(number.formatted(.number.precision(.fractionLength(0...1))))
+                        .font(.caption2.monospacedDigit())
+                }
+            }
+        }
+    }
+
+    private func selectedPoint(in points: [Point]) -> Point? {
+        guard let selectedChartDate else { return nil }
+        return points.min { abs(plottedDate($0.date).timeIntervalSince(selectedChartDate))
+            < abs(plottedDate($1.date).timeIntervalSince(selectedChartDate)) }
+    }
+
+    private func barColor(for point: Point, points: [Point], color: Color) -> Color {
+        guard let selected = selectedPoint(in: points) else { return color }
+        return point.id == selected.id ? color : color.opacity(0.35)
+    }
+
+    private func selectionOverlay(_ proxy: ChartProxy, points: [Point]) -> some View {
+        GeometryReader { geometry in
+            if let anchor = proxy.plotFrame {
+                let plot = geometry[anchor]
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .gesture(SpatialTapGesture().onEnded { event in
+                        guard plot.contains(event.location) else { return }
+                        selectedChartDate = proxy.value(atX: event.location.x - plot.minX, as: Date.self)
+                    })
+                if let point = selectedPoint(in: points),
+                   let plotX = proxy.position(forX: plottedDate(point.date)),
+                   let plotY = proxy.position(forY: point.value) {
+                    let x = plot.minX + plotX
+                    let y = plot.minY + plotY
+                    let width = min(180, geometry.size.width)
+                    let halfHeight: CGFloat = dynamicTypeSize.isAccessibilitySize ? 70 : 38
+                    Path { path in
+                        path.move(to: CGPoint(x: x, y: plot.minY))
+                        path.addLine(to: CGPoint(x: x, y: plot.maxY))
+                    }.stroke(theme.accent.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .allowsHitTesting(false)
+                    Circle().fill(theme.accent).frame(width: 8, height: 8)
+                        .position(x: x, y: y).allowsHitTesting(false)
+                    selectionDetail(point)
+                        .frame(width: width)
+                        .position(x: min(max(x, width / 2), geometry.size.width - width / 2),
+                                  y: max(halfHeight, y - halfHeight - 10))
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+    private func selectionDetail(_ point: Point) -> some View {
+        VStack(spacing: 4) {
+            if isYearlyPeriod {
+                Text(point.date, format: .dateTime.year().month()).font(.caption)
+            } else {
+                Text(point.date, format: .dateTime.month().day().weekday(.abbreviated)).font(.caption)
+            }
+            Text(metric == 0 ? point.value.formatted(.number.precision(.fractionLength(0...1))) + " Km"
+                 : metric == 1 ? point.value.formatted(.number.precision(.fractionLength(1))) + " Km/L" : yen(point.value))
+                .font(.subheadline.bold().monospacedDigit())
+            if metric == 2, let unitPrice = point.secondary {
+                Text("単価 \(yen(unitPrice))/L").font(.caption).foregroundStyle(fuelUnitPriceColor)
+            }
+        }
+        .foregroundStyle(.primary).padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(CarLogStyle.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+        .accessibilityElement(children: .combine)
     }
 
     private var isYearlyPeriod: Bool { (metric == 0 && period == 2) || (metric != 0 && period == 1) }
@@ -280,7 +407,7 @@ struct AnalyticsView: View {
     private var selectedPeriodLabel: String { periodLabels.indices.contains(period) ? periodLabels[period] : periodLabels[0] }
     private var previousDataRequirement: String { metric == 1 ? "前期燃費1件必要" : "前期記録1件必要" }
 
-    private var chartTitle: String { switch metric { case 0: "日別の走行距離"; case 1: "燃費の推移"; default: "支払額と単価の推移" } }
+    private var chartTitle: String { switch metric { case 0: isYearlyPeriod ? "月別の走行距離" : "日別の走行距離"; case 1: "燃費の推移"; default: "支払額と単価の推移" } }
     private var fuelCostBarColor: Color {
         colorScheme == .dark ? Color(hex: "55AFFF") : Color(hex: "126FC5")
     }
@@ -308,8 +435,8 @@ struct AnalyticsView: View {
         return calendar.dateInterval(of: component, for: date)!
     }
     private var dayCount: Int { analysisCalendar.dateComponents([.day], from: selectedInterval.start, to: selectedInterval.end).day ?? 1 }
-    private func filteredTrips(_ id: UUID) -> [TripRecord] { store.trips(for: id).filter { selectedInterval.contains($0.date) } }
-    private func filteredFuels(_ id: UUID) -> [FuelRecord] { store.fuels(for: id).filter { selectedInterval.contains($0.date) }.sorted { $0.date < $1.date } }
+    private func filteredTrips(_ id: UUID) -> [TripRecord] { store.trips(for: id).filter { $0.date >= selectedInterval.start && $0.date < selectedInterval.end } }
+    private func filteredFuels(_ id: UUID) -> [FuelRecord] { store.fuels(for: id).filter { $0.date >= selectedInterval.start && $0.date < selectedInterval.end }.sorted { $0.date < $1.date } }
     private func previousDistance(_ id: UUID) -> Double { store.trips(for: id).filter { previousInterval.contains($0.date) }.reduce(0) { $0 + $1.distance } }
     private func previousFuelCost(_ id: UUID) -> Double { store.fuels(for: id).filter { previousInterval.contains($0.date) }.reduce(0) { $0 + $1.totalPrice } }
     private func previousEfficiency(_ id: UUID) -> Double? { let values = store.fuels(for: id).filter { previousInterval.contains($0.date) }.compactMap(store.fuelEfficiency); return values.isEmpty ? nil : values.reduce(0, +) / Double(values.count) }
