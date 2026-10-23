@@ -39,6 +39,83 @@ final class AppStoreTests: XCTestCase {
         return try decoder.decode(AppData.self, from: Data(contentsOf: url))
     }
 
+    @MainActor func testDriverTotalsReflectEditsDeletesCarsAndOtherNames() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        let secondCar = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        XCTAssertTrue(store.addVehicle(secondCar))
+        let family = DriverProfile(name: "家族", colorHex: "FF9500")
+        XCTAssertTrue(store.saveDriver(family))
+        let date = Date(timeIntervalSince1970: 1000)
+        let range = DateInterval(start: date, duration: 100)
+        var main = TripRecord(vehicleID: car.id, date: date, distance: 40, mode: .distance, purpose: "", note: "")
+        var other = TripRecord(vehicleID: car.id, date: date, distance: 30, mode: .distance, purpose: "", note: "", driverID: DriverProfile.otherID, customDriverName: "田中さん")
+        let another = TripRecord(vehicleID: secondCar.id, date: date, distance: 20, mode: .distance, purpose: "", note: "", driverID: DriverProfile.otherID, customDriverName: "佐藤さん")
+        let boundary = TripRecord(vehicleID: car.id, date: range.end, distance: 10, mode: .distance, purpose: "", note: "", driverID: family.id)
+        for record in [main, other, another, boundary] { XCTAssertTrue(store.addTrip(record)) }
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == DriverProfile.otherID }?.distance, 50)
+        XCTAssertEqual(store.driverDistances(vehicleID: car.id, interval: range).first { $0.id == DriverProfile.otherID }?.distance, 30)
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == family.id }?.distance, 0)
+        let odo = store.selectedVehicle?.odometer
+        main.driverID = family.id
+        XCTAssertTrue(store.updateTrip(main))
+        XCTAssertEqual(store.selectedVehicle?.odometer, odo)
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == DriverProfile.mainID }?.distance, 0)
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == family.id }?.distance, 40)
+        other.distance = 25
+        XCTAssertTrue(store.updateTrip(other))
+        XCTAssertTrue(store.deleteTrip(id: another.id))
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == DriverProfile.otherID }?.distance, 25)
+        var archived = family
+        archived.isArchived = true
+        XCTAssertTrue(store.saveDriver(archived))
+        XCTAssertFalse(store.activeDrivers.contains { $0.id == family.id })
+        XCTAssertEqual(store.driverDistances(interval: range).first { $0.id == family.id }?.distance, 40)
+        let backup = try export(store)
+        let (restored, _) = try makeStore()
+        try restored.restore(from: backup)
+        XCTAssertEqual(restored.drivers, store.drivers)
+        XCTAssertEqual(restored.data.trips, store.data.trips)
+        XCTAssertEqual(restored.driverName(for: other), "田中さん")
+    }
+
+    @MainActor func testCalendarUsesDriverOtherAndMixedColors() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        let main = TripRecord(vehicleID: car.id, date: Date(), distance: 40, mode: .distance, purpose: "", note: "")
+        var other = TripRecord(vehicleID: car.id, date: Date(), distance: 20, mode: .distance, purpose: "", note: "", driverID: DriverProfile.otherID, customDriverName: "田中さん")
+        XCTAssertEqual(store.calendarColor(for: [main]), store.driver(for: main).color)
+        XCTAssertEqual(store.calendarColor(for: [main, main]), store.driver(for: main).color)
+        XCTAssertEqual(store.calendarColor(for: [other]), store.driver(for: other).color)
+        XCTAssertEqual(store.calendarColor(for: [main, other]), DriverProfile.mixedColor)
+        let first = other
+        other.customDriverName = "佐藤さん"
+        XCTAssertEqual(store.calendarColor(for: [first, other]), DriverProfile.mixedColor)
+    }
+
+    @MainActor func testInvalidDriverDoesNotChangeRecordsOrOdometer() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        let invalid = TripRecord(vehicleID: car.id, date: Date(), distance: 40, mode: .distance, purpose: "", note: "", driverID: UUID())
+        XCTAssertFalse(store.addTrip(invalid))
+        XCTAssertTrue(store.data.trips.isEmpty)
+        XCTAssertEqual(store.selectedVehicle?.odometer, car.odometer)
+    }
+
+    func testLegacyTripsWithoutDriverDecodeAsMainUser() throws {
+        let car = vehicle()
+        let record = trip(car)
+        let encoded = try JSONEncoder().encode(record)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        json.removeValue(forKey: "driverID")
+        json.removeValue(forKey: "customDriverName")
+        let decoded = try JSONDecoder().decode(TripRecord.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(decoded.resolvedDriverID, DriverProfile.mainID)
+        XCTAssertEqual(decoded.distance, record.distance)
+    }
+
     @MainActor func testLatestOdometerRecordCanKeepItsDistanceWhenEditingNote() async throws {
         let (store, _) = try makeStore()
         let car = vehicle()

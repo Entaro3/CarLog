@@ -29,6 +29,51 @@ final class AppStore: ObservableObject {
 
     var appearanceMode: AppAppearance { data.appearanceMode ?? .system }
 
+    var drivers: [DriverProfile] { data.drivers ?? DriverProfile.defaults }
+    var activeDrivers: [DriverProfile] { drivers.filter { !$0.isArchived } }
+
+    func driver(for trip: TripRecord) -> DriverProfile {
+        drivers.first { $0.id == trip.resolvedDriverID } ?? DriverProfile.defaults[0]
+    }
+
+    func driverName(for trip: TripRecord) -> String {
+        if trip.resolvedDriverID == DriverProfile.otherID,
+           let name = trip.customDriverName, !name.isEmpty { return name }
+        return driver(for: trip).name
+    }
+
+    func driverDistances(vehicleID: UUID? = nil, interval: DateInterval? = nil) -> [DriverDistance] {
+        let trips = data.trips.filter { trip in
+            (vehicleID == nil || trip.vehicleID == vehicleID)
+                && (interval.map { range in trip.date >= range.start && trip.date < range.end } ?? true)
+        }
+        return drivers.map { profile in
+            DriverDistance(driver: profile, distance: trips.filter { $0.resolvedDriverID == profile.id }.reduce(0) { $0 + $1.distance })
+        }
+    }
+
+    func calendarColor(for trips: [TripRecord]) -> Color {
+        let identities = Set(trips.map { trip in
+            trip.resolvedDriverID.uuidString + (trip.resolvedDriverID == DriverProfile.otherID ? (trip.customDriverName ?? "") : "")
+        })
+        return identities.count > 1
+            ? DriverProfile.mixedColor : trips.first.map { driver(for: $0).color } ?? .secondary
+    }
+
+    @discardableResult
+    func saveDriver(_ profile: DriverProfile) -> Bool {
+        commit { candidate in
+            var profiles = candidate.drivers ?? DriverProfile.defaults
+            var value = profile
+            value.name = value.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.id == DriverProfile.otherID { value.name = "その他" }
+            guard !value.name.isEmpty else { throw MileageError("ユーザー名を入力してください。") }
+            if let index = profiles.firstIndex(where: { $0.id == value.id }) { profiles[index] = value }
+            else { profiles.append(value) }
+            candidate.drivers = profiles
+        }
+    }
+
     static func vehiclePhotoURL(filename: String) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("CarLog/VehiclePhotos", isDirectory: true).appendingPathComponent(filename)
@@ -302,6 +347,14 @@ final class AppStore: ObservableObject {
     private static func validateMileage(in candidate: AppData) throws {
         guard candidate.vehicles.allSatisfy({ $0.odometer.isFinite && $0.odometer >= 0 }) else {
             throw MileageError("車両ODOが不正、または0未満になります。記録の走行距離、または車両設定のODOを確認してください。")
+        }
+        let profiles = candidate.drivers ?? DriverProfile.defaults
+        let driverIDs = Set(profiles.map(\.id))
+        guard driverIDs.count == profiles.count,
+              driverIDs.contains(DriverProfile.mainID), driverIDs.contains(DriverProfile.otherID),
+              profiles.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              candidate.trips.allSatisfy({ driverIDs.contains($0.resolvedDriverID) }) else {
+            throw MileageError("走行記録のユーザーを確認してください。")
         }
         let vehicleIDs = Set(candidate.vehicles.map(\.id))
         guard candidate.trips.allSatisfy({ vehicleIDs.contains($0.vehicleID) }),

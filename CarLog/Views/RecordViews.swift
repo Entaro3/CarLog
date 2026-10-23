@@ -55,6 +55,7 @@ struct RecordsView: View {
                         }.frame(maxWidth: .infinity, alignment: .leading)
                         VStack(alignment: .trailing, spacing: 3) {
                             Text(trip.distance.formatted(.number.precision(.fractionLength(1))) + " Km").font(.title3.bold()).foregroundStyle(.primary).lineLimit(1).minimumScaleFactor(0.75)
+                            Text(store.driverName(for: trip)).foregroundStyle(store.driver(for: trip).color).font(.caption)
                             Text(trip.mode.displayName).font(.subheadline).foregroundStyle(CarLogStyle.label).lineLimit(1).minimumScaleFactor(0.75)
                         }.frame(width: 132, alignment: .trailing)
                         Image(systemName: "chevron.right").foregroundStyle(CarLogStyle.label).frame(width: 10)
@@ -152,9 +153,10 @@ struct TripEditorView: View {
     @State private var isRecognizingMeter = false
     @State private var meterError: String?
     @State private var showsMismatchConfirmation = false
-    @State private var pendingDistanceRecord: TripRecord?
-    @State private var distanceRecordToOverwrite: TripRecord?
-    @State private var showsDistanceOverwriteConfirmation = false
+    @State private var driverID: UUID
+    @State private var customDriverName: String
+    @State private var nameDraft = ""
+    @State private var showsDriverNameInput = false
     @State private var validationMessage: String?
 
     init(vehicleID: UUID, existing: TripRecord? = nil) {
@@ -162,6 +164,8 @@ struct TripEditorView: View {
         _date = State(initialValue: existing?.date ?? Date()); _distance = State(initialValue: existing?.distance ?? 0); _odometer = State(initialValue: existing?.odometer ?? 0)
         _mode = State(initialValue: existing?.mode ?? .odometer); _purpose = State(initialValue: existing?.purpose ?? ""); _note = State(initialValue: existing?.note ?? "")
         _modeIndex = State(initialValue: existing == nil ? 1 : 0)
+        _driverID = State(initialValue: existing?.resolvedDriverID ?? DriverProfile.mainID)
+        _customDriverName = State(initialValue: existing?.customDriverName ?? "")
     }
 
     var body: some View {
@@ -192,6 +196,7 @@ struct TripEditorView: View {
                         Text("入力時のODO（参考）：" + enteredOdometer.formatted(.number.precision(.fractionLength(0...1))) + " Km")
                             .font(.caption).foregroundStyle(CarLogStyle.label)
                     }
+                    driverSelector
                     TextField("目的（任意）", text: $purpose).carLogCard()
                     TextField("メモ（任意）", text: $note, axis: .vertical).carLogCard()
                     PrimaryActionButton(title: "記録を保存", action: save)
@@ -229,10 +234,14 @@ struct TripEditorView: View {
             Button("撮り直す", role: .cancel) { pendingMeterScan = nil; showsMeterSource = true }
             Button("この画像を確認") { meterScan = pendingMeterScan; pendingMeterScan = nil }
         } message: { Text(mismatchMessage) }
-        .alert("同日の走行距離記録があります", isPresented: $showsDistanceOverwriteConfirmation) {
-            Button("キャンセル", role: .cancel) { pendingDistanceRecord = nil; distanceRecordToOverwrite = nil }
-            Button("上書き", role: .destructive, action: overwriteDistanceRecord)
-        } message: { Text("走行距離は1日1記録です。同日に保存されている記録を今回の内容で上書きしますか？") }
+        .alert("ユーザー名を入力", isPresented: $showsDriverNameInput) {
+            TextField("今回運転した人の名前", text: $nameDraft)
+            Button("キャンセル", role: .cancel) { }
+            Button("使用する") {
+                customDriverName = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                driverID = DriverProfile.otherID
+            }.disabled(nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: { Text("入力した名前は記録に残り、距離は「その他」に合算されます。") }
         .alert("読み取りできませんでした", isPresented: Binding(get: { meterError != nil }, set: { if !$0 { meterError = nil } })) { Button("OK", role: .cancel) { meterError = nil } } message: { Text(meterError ?? "メーターが正面からはっきり写るように撮影してください。") }
         .alert("入力内容を確認してください", isPresented: Binding(get: { validationMessage != nil }, set: { if !$0 { validationMessage = nil } })) {
             Button("OK", role: .cancel) { validationMessage = nil }
@@ -240,6 +249,42 @@ struct TripEditorView: View {
             Text(validationMessage ?? "")
         }
         .overlay { if isRecognizingMeter { ZStack { Color.black.opacity(0.18).ignoresSafeArea(); ProgressView("メーターを読み取っています…").padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } } }
+    }
+
+    private var driverSelector: some View {
+        let profile = store.drivers.first { $0.id == driverID } ?? DriverProfile.defaults[0]
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("運転したユーザー").font(.headline)
+                Spacer()
+                Menu {
+                    ForEach(store.activeDrivers) { item in
+                        Button {
+                            driverID = item.id
+                            customDriverName = ""
+                        } label: {
+                            if driverID == item.id { Label(item.name, systemImage: "checkmark") }
+                            else { Text(item.name) }
+                        }
+                    }
+                    Divider()
+                    Button("名前を入力…", systemImage: "plus") {
+                        nameDraft = customDriverName
+                        showsDriverNameInput = true
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Circle().fill(profile.color).frame(width: 10, height: 10)
+                        Text(driverID == DriverProfile.otherID && !customDriverName.isEmpty ? customDriverName : profile.name)
+                        Image(systemName: "chevron.down").font(.caption)
+                    }
+                }
+            }
+            if driverID == DriverProfile.otherID {
+                Text("距離は「その他」に合算され、共通の色で表示されます。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.carLogCard()
     }
 
     private func save() {
@@ -250,24 +295,8 @@ struct TripEditorView: View {
             return
         }
         // A new ODO entry uses the vehicle current value; edits change saved distance only.
-        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: modeIndex == 0 ? distance : 0, odometer: existing?.odometer ?? (modeIndex == 1 ? odometer : nil), mode: existing?.mode ?? mode, purpose: purpose, note: note)
-        if value.odometer == nil,
-           let duplicate = store.trips(for: vehicleID).first(where: { $0.mode != .odometer && $0.id != value.id && Calendar.current.isDate($0.date, inSameDayAs: date) }) {
-            pendingDistanceRecord = value
-            distanceRecordToOverwrite = duplicate
-            showsDistanceOverwriteConfirmation = true
-            return
-        }
+        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: modeIndex == 0 ? distance : 0, odometer: existing?.odometer ?? (modeIndex == 1 ? odometer : nil), mode: existing?.mode ?? mode, purpose: purpose, note: note, driverID: driverID, customDriverName: driverID == DriverProfile.otherID ? customDriverName : nil)
         finishSaving(existing == nil ? store.addTrip(value) : store.updateTrip(value))
-    }
-
-    private func overwriteDistanceRecord() {
-        guard var pending = pendingDistanceRecord, let duplicate = distanceRecordToOverwrite else { return }
-        pending.id = duplicate.id
-        let saved = store.replaceTrip(pending, removing: existing?.id)
-        pendingDistanceRecord = nil
-        distanceRecordToOverwrite = nil
-        finishSaving(saved)
     }
 
     private func finishSaving(_ saved: Bool) {

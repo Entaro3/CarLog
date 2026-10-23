@@ -48,6 +48,12 @@ struct SettingsView: View {
                         }.settingsCard()
                     }
 
+                    section("ユーザー") {
+                        NavigationLink { DriverManagementView() } label: {
+                            rowLabel(symbol: "person.2.fill", title: "ユーザー管理", value: nil)
+                        }.buttonStyle(.plain).settingsCard()
+                    }
+
                     section("表示") {
                         VStack(spacing: 0) {
                             Menu {
@@ -322,4 +328,183 @@ struct BodyColorPickerView: View {
     private func target(_ title: String, color: Color, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) { HStack { Circle().fill(color).frame(width: 42, height: 42).overlay(Circle().stroke(Color.black.opacity(0.1))); Text(title).font(.caption.bold()); Spacer() }.padding(10).background(selected ? CarLogStyle.softBlue : Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? CarLogStyle.blue : CarLogStyle.border, lineWidth: selected ? 2 : 1)) }.buttonStyle(.plain)
     }
+}
+
+struct DriverManagementView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var editingDriver: DriverProfile?
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(store.activeDrivers) { profile in
+                    Button { editingDriver = profile } label: {
+                        HStack {
+                            Circle().fill(profile.color).frame(width: 14, height: 14)
+                            Text(profile.name).foregroundStyle(.primary)
+                            Spacer()
+                            if profile.id == DriverProfile.mainID { Text("メイン").foregroundStyle(.secondary) }
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Button("ユーザーを追加", systemImage: "person.badge.plus") {
+                    editingDriver = DriverProfile(name: "", colorHex: "FF9500")
+                }
+            } footer: {
+                Text("以前の走行記録は「自分」に引き継がれます。任意の名前で記録した距離は「その他」に合算されます。")
+            }
+            if store.drivers.contains(where: \.isArchived) {
+                Section("選択候補から外したユーザー") {
+                    ForEach(store.drivers.filter(\.isArchived)) { profile in
+                        Button { editingDriver = profile } label: {
+                            HStack {
+                                Circle().fill(profile.color).frame(width: 14, height: 14)
+                                Text(profile.name)
+                                Spacer()
+                                Text("編集して再追加").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            Section {
+                NavigationLink("ユーザー別の走行距離") { DriverMileageView() }
+            }
+        }
+        .navigationTitle("ユーザー管理").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .sheet(item: $editingDriver) { profile in
+            NavigationStack { DriverEditorView(profile: profile) }
+        }
+    }
+}
+
+private struct DriverEditorView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    let profile: DriverProfile
+    @State private var name: String
+    @State private var color: Color
+    @State private var error: String?
+    @State private var showsArchiveConfirmation = false
+
+    init(profile: DriverProfile) {
+        self.profile = profile
+        _name = State(initialValue: profile.name)
+        _color = State(initialValue: profile.color)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("ユーザー名", text: $name).disabled(profile.id == DriverProfile.otherID)
+                ColorPicker("ラベルカラー", selection: $color, supportsOpacity: false)
+            }
+            if profile.id == DriverProfile.otherID {
+                Section { Text("任意の名前で記録したユーザーには、この共通カラーを使います。").foregroundStyle(.secondary) }
+            }
+            if store.drivers.contains(where: { $0.id == profile.id }),
+               profile.id != DriverProfile.mainID, profile.id != DriverProfile.otherID {
+                Section {
+                    Button("選択候補から外す", role: .destructive) { showsArchiveConfirmation = true }
+                } footer: { Text("過去の走行記録・距離・色は残ります。") }
+            }
+        }
+        .navigationTitle("ユーザーを編集").navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") { save(archived: false) }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .confirmationDialog("このユーザーを選択候補から外しますか？", isPresented: $showsArchiveConfirmation, titleVisibility: .visible) {
+            Button("選択候補から外す", role: .destructive) { save(archived: true) }
+        }
+        .alert("保存できませんでした", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(error ?? "") }
+    }
+
+    private func save(archived: Bool) {
+        var value = profile
+        value.name = name
+        value.colorHex = color.hexString()
+        value.isArchived = archived
+        if store.saveDriver(value) { dismiss() }
+        else { error = store.lastError; store.lastError = nil }
+    }
+}
+
+struct DriverMileageView: View {
+    @EnvironmentObject private var store: AppStore
+    @State private var vehicleID: UUID?
+    @State private var month = Date().startOfMonth
+    @State private var period = 0
+
+    private var interval: DateInterval? {
+        switch period {
+        case 0: return Calendar.current.dateInterval(of: .month, for: month)
+        case 1: return Calendar.current.dateInterval(of: .year, for: month)
+        default: return nil
+        }
+    }
+
+    var body: some View {
+        let totals = store.driverDistances(vehicleID: vehicleID, interval: interval)
+        let total = totals.reduce(0) { $0 + $1.distance }
+        ZStack {
+            ScreenBackground()
+            ScrollView {
+                VStack(spacing: 14) {
+                    Picker("車両", selection: $vehicleID) {
+                        Text("全車両").tag(nil as UUID?)
+                        ForEach(store.data.vehicles) { car in
+                            Text(car.nickname.isEmpty ? car.name : car.nickname).tag(Optional(car.id))
+                        }
+                    }.pickerStyle(.menu).frame(maxWidth: .infinity, alignment: .leading).carLogCard(padding: 12)
+                    Picker("表示期間", selection: $period) {
+                        Text("月間").tag(0); Text("年間").tag(1); Text("全期間").tag(2)
+                    }.pickerStyle(.segmented)
+                    if period == 0 { MonthNavigator(month: $month) }
+                    if period == 1 {
+                        HStack {
+                            Button { moveYear(-1) } label: { Image(systemName: "chevron.left").padding(10) }
+                            Spacer()
+                            Text(month, format: .dateTime.year()).font(.title2.bold())
+                            Spacer()
+                            Button { moveYear(1) } label: { Image(systemName: "chevron.right").padding(10) }
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("合計走行距離").foregroundStyle(.secondary)
+                        Text(total.formatted(.number.precision(.fractionLength(0...1))) + " km").font(.largeTitle.bold())
+                        ForEach(totals) { item in
+                            VStack(spacing: 6) {
+                                HStack {
+                                    Circle().fill(item.driver.color).frame(width: 12, height: 12)
+                                    Text(item.driver.name + (item.driver.isArchived ? "（選択候補外）" : ""))
+                                    Spacer()
+                                    Text(item.distance.formatted(.number.precision(.fractionLength(0...1))) + " km").monospacedDigit()
+                                }
+                                GeometryReader { proxy in
+                                    Capsule().fill(item.driver.color.opacity(0.12))
+                                    Capsule().fill(item.driver.color).frame(width: total > 0 ? proxy.size.width * item.distance / total : 0)
+                                }.frame(height: 6)
+                            }
+                        }
+                    }.carLogCard()
+                    Text("車両を切り替えると、車両ごとのユーザー走行距離を確認できます。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.padding(18)
+            }
+        }
+        .navigationTitle("ユーザー別の走行距離").navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+    }
+    private func moveYear(_ value: Int) {
+        if let date = Calendar.current.date(byAdding: .year, value: value, to: month) { month = date }
+    }
+
 }

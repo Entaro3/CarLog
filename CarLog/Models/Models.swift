@@ -102,6 +102,10 @@ struct TripRecord: Identifiable, Codable, Hashable {
     var mode: TripInputMode
     var purpose: String
     var note: String
+    var driverID: UUID? = nil
+    var customDriverName: String? = nil
+
+    var resolvedDriverID: UUID { driverID ?? DriverProfile.mainID }
 }
 
 struct FuelRecord: Identifiable, Codable, Hashable {
@@ -125,9 +129,31 @@ struct NotificationSettings: Codable, Hashable {
     var carPlayOnly = true
 }
 
+struct DriverProfile: Identifiable, Codable, Hashable {
+    static let mainID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    static let otherID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+    static let mixedColor = Color(hex: "596273")
+    static let defaults = [
+        DriverProfile(id: mainID, name: "自分", colorHex: "007AFF"),
+        DriverProfile(id: otherID, name: "その他", colorHex: "AF52DE")
+    ]
+    var id = UUID()
+    var name: String
+    var colorHex: String
+    var isArchived = false
+    var color: Color { Color(hex: colorHex) }
+}
+
+struct DriverDistance: Identifiable {
+    var id: UUID { driver.id }
+    let driver: DriverProfile
+    let distance: Double
+}
+
 struct AppData: Codable {
     var vehicles: [Vehicle] = []
     var trips: [TripRecord] = []
+    var drivers: [DriverProfile]? = nil
     var fuels: [FuelRecord] = []
     var notificationSettings = NotificationSettings()
     var weekStartsMonday = true

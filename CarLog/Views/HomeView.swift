@@ -12,6 +12,8 @@ struct HomeView: View {
     let openAnalytics: (Int) -> Void
     let openRecord: (HomeRecordDestination) -> Void
     @State private var displayedMonth = Date().startOfMonth
+    @State private var selectedCalendarDate = Date()
+    @State private var editingTrip: TripRecord?
 
     init(
         openAnalytics: @escaping (Int) -> Void = { _ in },
@@ -32,6 +34,10 @@ struct HomeView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .onChange(of: displayedMonth) { _, month in selectedCalendarDate = month }
+        .sheet(item: $editingTrip) { trip in
+            NavigationStack { TripEditorView(vehicleID: trip.vehicleID, existing: trip) }
+        }
     }
 
     private func header(_ vehicle: Vehicle) -> some View {
@@ -199,35 +205,77 @@ struct HomeView: View {
         let weekday = calendar.component(.weekday, from: interval.start)
         let firstWeekday = store.data.weekStartsMonday ? (weekday + 5) % 7 : weekday - 1
         let days = calendar.range(of: .day, in: .month, for: displayedMonth)!.count
-        let trips = store.trips(for: vehicle.id).filter { interval.contains($0.date) }
+        let trips = store.trips(for: vehicle.id).filter { $0.date >= interval.start && $0.date < interval.end }
         let weekdayLabels = store.data.weekStartsMonday ? ["月","火","水","木","金","土","日"] : ["日","月","火","水","木","金","土"]
-        return VStack(spacing: 12) {
+        let selectedTrips = trips.filter { calendar.isDate($0.date, inSameDayAs: selectedCalendarDate) }
+        return VStack(alignment: .leading, spacing: 12) {
             MonthNavigator(month: $displayedMonth)
             HStack { ForEach(weekdayLabels, id: \.self) { Text($0).font(.caption).foregroundStyle($0 == "日" ? .red : $0 == "土" ? theme.accent : CarLogStyle.label).frame(maxWidth: .infinity) } }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: 7), spacing: 6) {
                 ForEach(0..<(firstWeekday + days), id: \.self) { index in
-                    if index < firstWeekday { Color.clear.frame(height: 58) } else {
+                    if index < firstWeekday { Color.clear.frame(height: 64) } else {
                         let day = index - firstWeekday + 1
                         let date = calendar.date(byAdding: .day, value: day - 1, to: interval.start)!
-                        let total = trips.filter { calendar.isDate($0.date, inSameDayAs: date) }.reduce(0) { $0 + $1.distance }
-                        VStack(spacing: 3) {
-                            Text("\(day)").font(.subheadline).frame(width: 28, height: 28).background(calendar.isDateInToday(date) ? theme.accent : .clear, in: Circle()).foregroundStyle(calendar.isDateInToday(date) ? .white : .primary)
-                            if total > 0 {
-                                Text(total.formatted(.number.precision(.fractionLength(1))) + " Km")
-                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(colorScheme == .dark ? theme.deepAccent : theme.accent)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.65)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.horizontal, 3)
-                                    .padding(.vertical, 3)
-                                    .background(theme.accent.opacity(colorScheme == .dark ? 0.25 : 0.11), in: Capsule())
-                            } else {
-                                Color.clear.frame(height: 18)
+                        let dayTrips = trips.filter { calendar.isDate($0.date, inSameDayAs: date) }
+                        let total = dayTrips.reduce(0) { $0 + $1.distance }
+                        let color = store.calendarColor(for: dayTrips)
+                        let selected = calendar.isDate(date, inSameDayAs: selectedCalendarDate)
+                        Button { selectedCalendarDate = date } label: {
+                            VStack(spacing: 3) {
+                                Text("\(day)").font(.subheadline)
+                                    .frame(width: 28, height: 28)
+                                    .background(calendar.isDateInToday(date) ? theme.accent : .clear, in: Circle())
+                                    .foregroundStyle(calendar.isDateInToday(date) ? .white : .primary)
+                                if !dayTrips.isEmpty {
+                                    Text(total.formatted(.number.precision(.fractionLength(0...1))) + " km")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(color)
+                                        .lineLimit(1).minimumScaleFactor(0.65)
+                                        .frame(maxWidth: .infinity).padding(.vertical, 3)
+                                        .background(color.opacity(colorScheme == .dark ? 0.25 : 0.11), in: Capsule())
+                                } else { Color.clear.frame(height: 18) }
                             }
-                        }.frame(height: 58)
+                            .padding(.horizontal, 2).frame(maxWidth: .infinity).frame(height: 64)
+                            .background(selected ? theme.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? theme.accent : .clear))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(date.formatted(.dateTime.month().day()) + "、" + total.formatted() + "キロメートル")
+                        .accessibilityAddTraits(selected ? .isSelected : [])
                     }
                 }
+            }
+            Divider()
+            Text(selectedCalendarDate, format: .dateTime.month().day().weekday(.wide)).font(.headline)
+            HStack {
+                Text("合計走行距離").foregroundStyle(.secondary)
+                Spacer()
+                Text(selectedTrips.reduce(0) { $0 + $1.distance }.formatted(.number.precision(.fractionLength(0...1))) + " km")
+                    .font(.title2.bold()).monospacedDigit()
+            }
+            if selectedTrips.isEmpty {
+                Text("この日の走行記録はありません。").font(.subheadline).foregroundStyle(.secondary).padding(.vertical, 8)
+            }
+            ForEach(selectedTrips) { trip in
+                Button { editingTrip = trip } label: {
+                    HStack(spacing: 10) {
+                        Circle().fill(store.driver(for: trip).color).frame(width: 12, height: 12)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(store.driver(for: trip).name).font(.headline).foregroundStyle(.primary)
+                            if trip.resolvedDriverID == DriverProfile.otherID,
+                               let name = trip.customDriverName, !name.isEmpty {
+                                Text(name).font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            Text(trip.date.formatted(.dateTime.hour().minute()) + "・" + trip.mode.displayName)
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 4)
+                        Text(trip.distance.formatted(.number.precision(.fractionLength(0...1))) + " km")
+                            .foregroundStyle(.primary).monospacedDigit()
+                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 7).contentShape(Rectangle())
+                }.buttonStyle(.plain)
             }
         }.carLogCard(padding: 12)
     }

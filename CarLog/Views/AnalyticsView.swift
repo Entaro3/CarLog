@@ -45,6 +45,15 @@ struct AnalyticsView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        if metric == 0 {
+                            NavigationLink { DriverMileageView() } label: {
+                                HStack {
+                                    Label("ユーザー別の走行距離", systemImage: "person.2.fill")
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                }.carLogCard(padding: 14)
+                            }.buttonStyle(.plain)
+                        }
                         periodNavigator.padding(.vertical, 5)
                         if hasSufficientData(vehicle.id) {
                             summaryCard(vehicle)
