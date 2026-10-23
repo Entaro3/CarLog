@@ -13,6 +13,7 @@ enum ImagePickerSource {
 
 struct ImagePicker: UIViewControllerRepresentable {
     let source: ImagePickerSource
+    var allowsEditing = true
     let onImage: (UIImage) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -21,7 +22,7 @@ struct ImagePicker: UIViewControllerRepresentable {
         let picker = UIImagePickerController()
         picker.delegate = context.coordinator
         picker.sourceType = UIImagePickerController.isSourceTypeAvailable(source.uiSource) ? source.uiSource : .photoLibrary
-        picker.allowsEditing = true
+        picker.allowsEditing = allowsEditing
         return picker
     }
     func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) { }
@@ -48,75 +49,164 @@ struct ReceiptScanResult: Identifiable {
     var recognizedText: String
 }
 
+enum MeterReadingKind: String {
+    case odometer = "ODO"
+    case tripA = "TRIP A"
+    case tripB = "TRIP B"
+    case trip = "TRIP"
+    case unclassified = "種類不明"
+
+    func matches(expectsOdometer: Bool) -> Bool {
+        expectsOdometer ? self == .odometer : (self == .tripA || self == .tripB || self == .trip)
+    }
+}
+
+struct MeterReading: Identifiable {
+    let id = UUID()
+    let kind: MeterReadingKind
+    let value: Double
+}
+
+struct MeterTextFragment {
+    let text: String
+    // Vision coordinates: normalized to the image, with the origin at bottom left.
+    let boundingBox: CGRect
+}
+
 struct MeterScanResult: Identifiable {
     let id = UUID()
     let image: UIImage
-    var odometer: Double?
-    var tripA: Double?
-    var tripB: Double?
-    var recognizedText: String
+    let readings: [MeterReading]
+    let recognizedText: String
 
-    var tripValue: Double? { tripA ?? tripB }
-    var tripLabel: String { tripA != nil ? "TRIP A" : tripB != nil ? "TRIP B" : "TRIP" }
+    var odometer: Double? { readings.first { $0.kind == .odometer }?.value }
+    var tripValue: Double? { readings.first { $0.kind.matches(expectsOdometer: false) }?.value }
+
+    func suggestedReading(expectsOdometer: Bool) -> MeterReading? {
+        let matching = readings.filter { $0.kind.matches(expectsOdometer: expectsOdometer) }
+        return matching.count == 1 ? matching[0] : nil
+    }
+}
+
+// Kept separate from Vision so layouts and ambiguous matches can be regression-tested.
+enum MeterReadingParser {
+    static func fragments(in text: String, bounds: (Range<String.Index>) -> CGRect) -> [MeterTextFragment] {
+        let pattern = #"(?i)(?<![A-Z])[O0]D[O0](?:METER)?(?![A-Z])|(?<![A-Z])TR[I1]P(?:\s*[AB])?(?![A-Z])|(?<![A-Z0-9])[AB](?![A-Z0-9])|\d+(?:,\d{3})*(?:\.\d+)?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            guard let range = Range(match.range, in: text) else { return nil }
+            let token = String(text[range])
+            if Double(token.replacingOccurrences(of: ",", with: "")) != nil {
+                let suffix = String(text[range.upperBound...])
+                let prefix = String(text[..<range.lowerBound])
+                // Speed, consumption, temperature and clock readings are not mileage.
+                if suffix.range(of: #"^\s*(?:KM\s*/\s*[HL]|MPH|RPM|MPG|MILES?\b|MI\b|[°℃℉%:]|L\s*/\s*100)"#, options: [.regularExpression, .caseInsensitive]) != nil
+                    || prefix.range(of: #":\s*$"#, options: .regularExpression) != nil { return nil }
+            }
+            return MeterTextFragment(text: token, boundingBox: bounds(range))
+        }
+    }
+
+    private static func kind(_ text: String) -> MeterReadingKind? {
+        let value = text.uppercased().filter { !$0.isWhitespace }
+        if ["ODO", "ODOMETER"].contains(value.replacingOccurrences(of: "0", with: "O")) { return .odometer }
+        if value == "TRIPA" || value == "TR1PA" { return .tripA }
+        if value == "TRIPB" || value == "TR1PB" { return .tripB }
+        if value == "TRIP" || value == "TR1P" { return .trip }
+        return nil
+    }
+
+    private static func score(_ label: CGRect, _ number: CGRect) -> CGFloat? {
+        let height = max(max(label.height, number.height), 0.01)
+        let vertical = abs(label.midY - number.midY)
+        let horizontalGap = max(0, max(label.minX - number.maxX, number.minX - label.maxX))
+        if vertical <= height * 0.6, horizontalGap <= 0.4 {
+            return vertical / height * 2 + horizontalGap / height
+        }
+        let verticalGap = max(0, max(label.minY - number.maxY, number.minY - label.maxY))
+        let overlap = min(label.maxX, number.maxX) - max(label.minX, number.minX)
+        if verticalGap <= max(0.04, height * 2), overlap > min(label.width, number.width) * 0.3 {
+            return 2 + verticalGap / height + abs(label.midX - number.midX) / height
+        }
+        return nil
+    }
+
+    private static func uniqueBest(_ scores: [(index: Int, score: CGFloat)]) -> Int? {
+        let ranked = scores.sorted { $0.score < $1.score }
+        guard let first = ranked.first else { return nil }
+        // Similar alternatives require an explicit choice; don't guess the category.
+        if ranked.count > 1, ranked[1].score - first.score < 0.35 { return nil }
+        return first.index
+    }
+
+    static func readings(from fragments: [MeterTextFragment]) -> [MeterReading] {
+        var labels = fragments.compactMap { fragment -> (kind: MeterReadingKind, box: CGRect)? in
+            guard let readingKind = kind(fragment.text) else { return nil }
+            return (readingKind, fragment.boundingBox)
+        }
+        // Some displays produce three separate observations: TRIP, A/B, and digits.
+        for index in labels.indices where labels[index].kind == .trip {
+            let letters = fragments.filter { ["A", "B"].contains($0.text.uppercased()) }
+            let scores = letters.enumerated().compactMap { offset, letter -> (index: Int, score: CGFloat)? in
+                guard let distanceScore = score(labels[index].box, letter.boundingBox), distanceScore < 2 else { return nil }
+                return (offset, distanceScore)
+            }
+            if let match = uniqueBest(scores) {
+                labels[index].kind = letters[match].text.uppercased() == "A" ? .tripA : .tripB
+                labels[index].box = labels[index].box.union(letters[match].boundingBox)
+            }
+        }
+        let numbers = fragments.compactMap { fragment -> (value: Double, box: CGRect)? in
+            guard let value = Double(fragment.text.replacingOccurrences(of: ",", with: "")), value.isFinite, value >= 0 else { return nil }
+            return (value, fragment.boundingBox)
+        }
+        let labelChoices = labels.map { label in
+            uniqueBest(numbers.enumerated().compactMap { index, number in
+                score(label.box, number.box).map { (index: index, score: $0) }
+            })
+        }
+        var readings: [MeterReading] = []
+        for (index, number) in numbers.enumerated() {
+            let labelIndex = uniqueBest(labels.enumerated().compactMap { index, label in
+                score(label.box, number.box).map { (index: index, score: $0) }
+            })
+            let kind: MeterReadingKind
+            if let labelIndex, labelChoices[labelIndex] == index { kind = labels[labelIndex].kind }
+            else { kind = .unclassified }
+            if !readings.contains(where: { $0.kind == kind && $0.value == number.value }) {
+                readings.append(MeterReading(kind: kind, value: number.value))
+            }
+        }
+        return readings
+    }
 }
 
 enum MeterOCRService {
     static func recognize(_ image: UIImage) async throws -> MeterScanResult {
         guard let cgImage = image.cgImage else { throw RecognitionError.invalidImage }
-        let lines: [String] = try await withCheckedThrowingContinuation { continuation in
-            let request = VNRecognizeTextRequest { request, error in
-                if let error { continuation.resume(throwing: error); return }
-                let observations = request.results as? [VNRecognizedTextObservation] ?? []
-                continuation.resume(returning: observations.compactMap { $0.topCandidates(1).first?.string })
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = false
-            request.recognitionLanguages = ["en-US", "ja-JP"]
+        let orientation = image.cgOrientation
+        let content: (fragments: [MeterTextFragment], text: String) = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                do { try VNImageRequestHandler(cgImage: cgImage, orientation: image.cgOrientation).perform([request]) }
-                catch { continuation.resume(throwing: error) }
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                request.recognitionLanguages = ["en-US", "ja-JP"]
+                do {
+                    try VNImageRequestHandler(cgImage: cgImage, orientation: orientation).perform([request])
+                    var fragments: [MeterTextFragment] = []
+                    var lines: [String] = []
+                    for observation in request.results ?? [] {
+                        guard let candidate = observation.topCandidates(1).first else { continue }
+                        lines.append(candidate.string)
+                        fragments += MeterReadingParser.fragments(in: candidate.string) { range in
+                            (try? candidate.boundingBox(for: range))?.boundingBox ?? observation.boundingBox
+                        }
+                    }
+                    continuation.resume(returning: (fragments, lines.joined(separator: "\n")))
+                } catch { continuation.resume(throwing: error) }
             }
         }
-        let normalized = lines.map { $0.uppercased().replacingOccurrences(of: "O", with: "0", options: [], range: nil) }
-        var odo: Double?
-        var tripA: Double?
-        var tripB: Double?
-        for index in normalized.indices {
-            let originalUpper = lines[index].uppercased()
-            let end = min(lines.count, index + 4)
-            let nearby = lines[index..<end].joined(separator: " ")
-            if originalUpper.contains("ODO") || originalUpper.contains("ODOMETER") { odo = odo ?? meterNumber(in: nearby, after: ["ODOMETER", "ODO"]) }
-            if originalUpper.contains("TRIP A") || originalUpper.replacingOccurrences(of: " ", with: "").contains("TRIPA") { tripA = tripA ?? meterNumber(in: nearby, after: ["TRIP A", "TRIPA"] ) }
-            if originalUpper.contains("TRIP B") || originalUpper.replacingOccurrences(of: " ", with: "").contains("TRIPB") { tripB = tripB ?? meterNumber(in: nearby, after: ["TRIP B", "TRIPB"] ) }
-            if originalUpper == "TRIP", index + 1 < lines.count {
-                let next = lines[index + 1].uppercased()
-                if next == "A" { tripA = tripA ?? firstMeterNumber(in: lines[index..<end].joined(separator: " ")) }
-                if next == "B" { tripB = tripB ?? firstMeterNumber(in: lines[index..<end].joined(separator: " ")) }
-            }
-        }
-        if odo == nil, tripA == nil, tripB == nil {
-            let fallback = lines.compactMap(firstMeterNumber).first
-            return MeterScanResult(image: image, odometer: nil, tripA: fallback, tripB: nil, recognizedText: lines.joined(separator: "\n"))
-        }
-        _ = normalized
-        return MeterScanResult(image: image, odometer: odo, tripA: tripA, tripB: tripB, recognizedText: lines.joined(separator: "\n"))
-    }
-
-    private static func meterNumber(in text: String, after labels: [String]) -> Double? {
-        var value = text.uppercased()
-        for label in labels { value = value.replacingOccurrences(of: label, with: " ") }
-        return firstMeterNumber(in: value)
-    }
-
-    private static func firstMeterNumber(in text: String) -> Double? {
-        let pattern = #"(\d[\d,\s]*?(?:\.\d+)?)\s*(?:KM|KM/H|$)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
-        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-            guard let range = Range(match.range(at: 1), in: text) else { continue }
-            let cleaned = text[range].replacingOccurrences(of: ",", with: "").replacingOccurrences(of: " ", with: "")
-            if let value = Double(cleaned), value >= 0 { return value }
-        }
-        return nil
+        return MeterScanResult(image: image, readings: MeterReadingParser.readings(from: content.fragments), recognizedText: content.text)
     }
 
     enum RecognitionError: Error { case invalidImage }

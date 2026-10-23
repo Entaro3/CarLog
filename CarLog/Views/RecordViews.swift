@@ -205,7 +205,7 @@ struct TripEditorView: View {
         }
         .navigationTitle(existing == nil ? "走行距離を記録" : "走行記録を編集").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("保存", action: save) } }
-        .sheet(isPresented: $showsMeterPicker) { ImagePicker(source: meterImageSource, onImage: recognizeMeter) }
+        .sheet(isPresented: $showsMeterPicker) { ImagePicker(source: meterImageSource, allowsEditing: false, onImage: recognizeMeter) }
         .sheet(item: $meterScan) { scan in
             NavigationStack {
                 MeterOCRResultView(
@@ -306,11 +306,13 @@ struct MeterOCRResultView: View {
     let retake: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var value: Double
+    @State private var selectedReadingID: UUID?
 
     init(scan: MeterScanResult, expectsOdometer: Bool, apply: @escaping (Double) -> Void, retake: @escaping () -> Void) {
         self.scan = scan; self.expectsOdometer = expectsOdometer; self.apply = apply; self.retake = retake
-        let recognized = expectsOdometer ? (scan.odometer ?? scan.tripValue ?? 0) : (scan.tripValue ?? scan.odometer ?? 0)
-        _value = State(initialValue: recognized)
+        let suggested = scan.suggestedReading(expectsOdometer: expectsOdometer)
+        _value = State(initialValue: suggested?.value ?? 0)
+        _selectedReadingID = State(initialValue: suggested?.id)
     }
 
     var body: some View {
@@ -319,13 +321,18 @@ struct MeterOCRResultView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Image(uiImage: scan.image).resizable().scaledToFit().frame(maxWidth: .infinity).frame(maxHeight: 340).clipShape(RoundedRectangle(cornerRadius: 10)).carLogCard(padding: 8)
-                    Text("認識した数値を確認してください").font(.headline).foregroundStyle(CarLogStyle.label)
-                    if let odo = scan.odometer { readingRow(label: "ODO", reading: odo) }
-                    if let tripA = scan.tripA { readingRow(label: "TRIP A", reading: tripA) }
-                    if let tripB = scan.tripB { readingRow(label: "TRIP B", reading: tripB) }
+                    Text(expectsOdometer ? "ODOの数値を確認してください" : "TRIPの数値を確認してください")
+                        .font(.headline).foregroundStyle(CarLogStyle.label)
+                    if scan.suggestedReading(expectsOdometer: expectsOdometer) == nil {
+                        Text("候補を選ぶか、画像を確認して数値を入力してください。種類不明の候補は、ODOかTRIPかを画像で確認してください。")
+                            .font(.subheadline).foregroundStyle(CarLogStyle.label)
+                    }
+                    ForEach(scan.readings) { reading in readingRow(reading) }
                     LabeledNumberField(title: expectsOdometer ? "オドメーター" : "トリップメーター", unit: "Km", value: $value).carLogCard()
-                    Text("数値をタップして修正できます").font(.subheadline).foregroundStyle(CarLogStyle.label)
+                    Text("選択した数値は修正できます。ODOとTRIPを取り違えていないか確認してください。")
+                        .font(.subheadline).foregroundStyle(CarLogStyle.label)
                     PrimaryActionButton(title: "入力画面へ反映") { apply(value) }
+                        .disabled(!value.isFinite || value <= 0)
                 }.padding(18)
             }
         }
@@ -336,11 +343,24 @@ struct MeterOCRResultView: View {
         }
     }
 
-    private func readingRow(label: String, reading: Double) -> some View {
-        let selected = abs(value - reading) < 0.0001
-        return Button { value = reading } label: {
-            HStack { Image(systemName: selected ? "checkmark.circle.fill" : "circle").foregroundStyle(selected ? CarLogStyle.blue : CarLogStyle.label); Text(label).font(.headline); Spacer(); Text(reading.formatted(.number.precision(.fractionLength(0...1))) + " Km").font(.title3.bold()) }.foregroundStyle(.primary).carLogCard(padding: 14)
-        }.buttonStyle(.plain)
+    private func readingRow(_ reading: MeterReading) -> some View {
+        let canUse = reading.kind == .unclassified || reading.kind.matches(expectsOdometer: expectsOdometer)
+        let selected = selectedReadingID == reading.id
+        return Button {
+            selectedReadingID = reading.id
+            value = reading.value
+        } label: {
+            HStack {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? CarLogStyle.blue : CarLogStyle.label)
+                VStack(alignment: .leading) {
+                    Text(reading.kind.rawValue).font(.headline)
+                    if !canUse { Text("今回の入力には使用しません").font(.caption).foregroundStyle(CarLogStyle.label) }
+                }
+                Spacer()
+                Text(reading.value.formatted(.number.precision(.fractionLength(0...1))) + " Km").font(.title3.bold())
+            }.foregroundStyle(.primary).carLogCard(padding: 14)
+        }.buttonStyle(.plain).disabled(!canUse).opacity(canUse ? 1 : 0.5)
     }
 }
 
@@ -410,7 +430,7 @@ struct FuelEditorView: View {
         .navigationTitle(existing == nil ? "給油を記録" : "給油記録を編集").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("保存", action: save) } }
         .sheet(isPresented: $showsImagePicker) { ImagePicker(source: imageSource, onImage: recognizeReceipt) }
-        .sheet(isPresented: $showsMeterPicker) { ImagePicker(source: meterImageSource, onImage: recognizeFuelMeter) }
+        .sheet(isPresented: $showsMeterPicker) { ImagePicker(source: meterImageSource, allowsEditing: false, onImage: recognizeFuelMeter) }
         .sheet(item: $receiptScan) { scan in
             NavigationStack {
                 ReceiptOCRResultView(

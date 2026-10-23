@@ -466,3 +466,126 @@ final class AppStoreTests: XCTestCase {
         XCTAssertNotNil(store.lastError)
     }
 }
+
+final class MeterOCRTests: XCTestCase {
+    private func fragment(_ text: String, x: CGFloat, y: CGFloat, width: CGFloat = 0.1, height: CGFloat = 0.04) -> MeterTextFragment {
+        MeterTextFragment(text: text, boundingBox: CGRect(x: x, y: y, width: width, height: height))
+    }
+
+    private func tokenize(_ text: String) -> [MeterTextFragment] {
+        MeterReadingParser.fragments(in: text) { range in
+            let nsRange = NSRange(range, in: text)
+            let total = CGFloat(text.utf16.count)
+            return CGRect(x: CGFloat(nsRange.location) / total * 0.9, y: 0.5,
+                          width: CGFloat(nsRange.length) / total * 0.9, height: 0.05)
+        }
+    }
+
+    func testStackedOdoAndTripAreSeparatedRegardlessOfObservationOrder() throws {
+        let readings = MeterReadingParser.readings(from: [
+            fragment("123.4", x: 0.4, y: 0.3),
+            fragment("ODO", x: 0.2, y: 0.7),
+            fragment("TRIP A", x: 0.2, y: 0.3),
+            fragment("12345", x: 0.4, y: 0.7)
+        ])
+        XCTAssertEqual(readings.first { $0.kind == .odometer }?.value, 12345)
+        XCTAssertEqual(readings.first { $0.kind == .tripA }?.value, 123.4)
+    }
+
+    func testSideBySideOdoAndTripAreSeparated() throws {
+        let readings = MeterReadingParser.readings(from: [
+            fragment("ODO", x: 0.05, y: 0.5),
+            fragment("12345", x: 0.18, y: 0.5),
+            fragment("TRIP B", x: 0.6, y: 0.5),
+            fragment("456.7", x: 0.75, y: 0.5)
+        ])
+        XCTAssertEqual(readings.first { $0.kind == .odometer }?.value, 12345)
+        XCTAssertEqual(readings.first { $0.kind == .tripB }?.value, 456.7)
+    }
+
+    func testMultipleLabelsInOneOcrLineAndCommaSeparatedOdo() throws {
+        let readings = MeterReadingParser.readings(from: tokenize("ODO 12,345 km TRIP A 123.4 km"))
+        XCTAssertEqual(readings.first { $0.kind == .odometer }?.value, 12345)
+        XCTAssertEqual(readings.first { $0.kind == .tripA }?.value, 123.4)
+    }
+
+    func testLabelsTouchingDigitsAreParsedWithoutMergingReadings() throws {
+        let readings = MeterReadingParser.readings(from: tokenize("ODO12345TRIPA123.4"))
+        XCTAssertEqual(Set(readings.map(\.value)), Set([12345, 123.4]))
+        XCTAssertFalse(readings.contains { $0.value == 12345123.4 })
+    }
+
+    func testDigitsBeforeLabelsAreNotAssignedUsingLabelBeforeNumberAssumption() throws {
+        let readings = MeterReadingParser.readings(from: tokenize("12345ODO123.4TRIPA"))
+        XCTAssertEqual(readings.count, 2)
+        XCTAssertTrue(readings.allSatisfy { $0.kind == .unclassified })
+    }
+
+    func testLabelBelowNumberIsAssociatedByPosition() throws {
+        let readings = MeterReadingParser.readings(from: [
+            fragment("12345", x: 0.35, y: 0.7, width: 0.3),
+            fragment("ODO", x: 0.45, y: 0.63)
+        ])
+        XCTAssertEqual(readings.first { $0.kind == .odometer }?.value, 12345)
+    }
+
+    func testSplitTripLetterIsPreserved() throws {
+        let readings = MeterReadingParser.readings(from: [
+            fragment("TRIP", x: 0.1, y: 0.5, width: 0.08),
+            fragment("B", x: 0.2, y: 0.5, width: 0.025),
+            fragment("456.7", x: 0.3, y: 0.5)
+        ])
+        XCTAssertEqual(readings.first { $0.kind == .tripB }?.value, 456.7)
+        XCTAssertFalse(readings.contains { $0.kind == .tripA })
+    }
+
+    func testAmbiguousNumbersRemainUnclassified() throws {
+        let ambiguous = MeterReadingParser.readings(from: [
+            fragment("ODO", x: 0.45, y: 0.5),
+            fragment("12345", x: 0.45, y: 0.43),
+            fragment("54321", x: 0.45, y: 0.57)
+        ])
+        XCTAssertEqual(ambiguous.count, 2)
+        XCTAssertTrue(ambiguous.allSatisfy { $0.kind == .unclassified })
+    }
+
+    func testUnlabeledDigitsAreNotAssumedToBeTrip() throws {
+        let readings = MeterReadingParser.readings(from: tokenize("12345 km"))
+        XCTAssertEqual(readings.count, 1)
+        XCTAssertEqual(readings.first?.kind, .unclassified)
+    }
+
+    func testSpeedTemperatureConsumptionAndClockAreNotMileageCandidates() throws {
+        let readings = MeterReadingParser.readings(from: tokenize("80 km/h 12:34 25°C 15.2 km/L"))
+        XCTAssertTrue(readings.isEmpty)
+    }
+
+    func testExpectedReadingIsSuggestedWhenOdoAndTripAreBothPresent() throws {
+        let odo = MeterReading(kind: .odometer, value: 12345)
+        let trip = MeterReading(kind: .tripA, value: 123.4)
+        let scan = MeterScanResult(image: UIImage(), readings: [trip, odo], recognizedText: "")
+        XCTAssertEqual(scan.suggestedReading(expectsOdometer: true)?.id, odo.id)
+        XCTAssertEqual(scan.suggestedReading(expectsOdometer: false)?.id, trip.id)
+    }
+
+    func testMultipleTripOrOdoCandidatesRequireExplicitChoice() throws {
+        let scan = MeterScanResult(image: UIImage(), readings: [
+            MeterReading(kind: .odometer, value: 12345),
+            MeterReading(kind: .odometer, value: 54321),
+            MeterReading(kind: .tripA, value: 123.4),
+            MeterReading(kind: .tripB, value: 456.7)
+        ], recognizedText: "")
+        XCTAssertNil(scan.suggestedReading(expectsOdometer: true))
+        XCTAssertNil(scan.suggestedReading(expectsOdometer: false))
+    }
+
+    func testMissingExpectedLabelDoesNotFallBackToOtherMeterKind() throws {
+        let scan = MeterScanResult(image: UIImage(), readings: [
+            MeterReading(kind: .tripA, value: 123.4),
+            MeterReading(kind: .unclassified, value: 12345)
+        ], recognizedText: "")
+        XCTAssertNil(scan.suggestedReading(expectsOdometer: true))
+        XCTAssertFalse(MeterReadingKind.tripA.matches(expectsOdometer: true))
+        XCTAssertFalse(MeterReadingKind.odometer.matches(expectsOdometer: false))
+    }
+}
