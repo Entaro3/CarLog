@@ -121,6 +121,8 @@ struct AppData: Codable {
     var notificationSettings = NotificationSettings()
     var weekStartsMonday = true
     var appearanceMode: AppAppearance?
+    // Backups embed image bytes; ordinary app storage keeps filenames only.
+    var vehiclePhotos: [String: Data]?
 }
 
 enum RecordItem: Identifiable {

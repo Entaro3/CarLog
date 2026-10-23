@@ -70,12 +70,11 @@ struct RecordsView: View {
         let values = filteredFuels(vehicle.id)
         let liters = values.reduce(0) { $0 + $1.liters }
         let cost = values.reduce(0) { $0 + $1.totalPrice }
-        let efficiencies = values.compactMap(store.fuelEfficiency)
         VStack(spacing: 10) {
             HStack(spacing: 0) {
                 summaryCell(period == 0 ? "月間給油量" : "年間給油量", liters.formatted(.number.precision(.fractionLength(1))) + " L")
                 Divider(); summaryCell(period == 0 ? "月間ガソリン代" : "年間ガソリン代", cost.formatted(.currency(code: "JPY").precision(.fractionLength(0))))
-                Divider(); summaryCell(period == 0 ? "平均燃費" : "給油回数", period == 0 ? (efficiencies.isEmpty ? "計算待ち" : efficiencies.reduce(0,+).formatted(.number.precision(.fractionLength(1))) + " Km/L") : "\(values.count)回")
+                Divider(); summaryCell(period == 0 ? "平均燃費" : "給油回数", period == 0 ? (store.averageFuelEfficiency(for: values).map { $0.formatted(.number.precision(.fractionLength(1))) + " Km/L" } ?? "計算待ち") : "\(values.count)回")
             }.carLogCard(padding: 14)
             if values.isEmpty { EmptyStateView(symbol: "fuelpump.fill", title: "給油記録がありません", message: "ホームから給油を登録できます。") }
             if period == 0 {
@@ -236,12 +235,12 @@ struct TripEditorView: View {
     }
 
     private func save() {
-        let currentOdometer = store.data.vehicles.first(where: { $0.id == vehicleID })?.odometer ?? 0
-        let computedDistance = modeIndex == 0 ? distance : odometer - currentOdometer
+        let startingOdometer = store.startingOdometer(vehicleID: vehicleID, editing: existing)
+        let computedDistance = modeIndex == 0 ? distance : odometer - startingOdometer
         guard computedDistance > 0 else {
             validationMessage = modeIndex == 0
                 ? "走行距離を0より大きい数値で入力してください。"
-                : "オドメーターは現在の値（\(currentOdometer.formatted(.number.precision(.fractionLength(0...1)))) Km）より大きい数値を入力してください。"
+                : "オドメーターは走行開始時の値（\(startingOdometer.formatted(.number.precision(.fractionLength(0...1)))) Km）より大きい数値を入力してください。"
             return
         }
         let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: computedDistance, odometer: modeIndex == 1 ? odometer : nil, mode: mode, purpose: purpose, note: note)

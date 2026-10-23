@@ -1,12 +1,14 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct SettingsView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.carLogTheme) private var theme
     @State private var editingVehicle: Vehicle?
     @State private var addingVehicle = false
-    @State private var exportURL: URL?
+    @State private var backupExport: BackupExport?
+    @State private var exportError: String?
     @State private var showsAbout = false
     @State private var showsRestoreConfirmation = false
     @State private var showsRestoreImporter = false
@@ -63,11 +65,12 @@ struct SettingsView: View {
 
                     section("データ") {
                         VStack(spacing: 0) {
-                            if let exportURL {
-                                ShareLink(item: exportURL) { rowLabel(symbol: "square.and.arrow.up", title: "データを書き出す", value: "バックアップ・CSV") }
-                            } else {
-                                Button { exportURL = try? store.exportURL() } label: { rowLabel(symbol: "square.and.arrow.up", title: "データを書き出す", value: "バックアップ・CSV") }.buttonStyle(.plain)
-                            }
+                            Button {
+                                do { backupExport = BackupExport(url: try store.exportURL()) }
+                                catch { exportError = "バックアップを書き出せませんでした。空き容量や車両写真を確認してください。" }
+                            } label: {
+                                rowLabel(symbol: "square.and.arrow.up", title: "データを書き出す", value: "写真付きバックアップ")
+                            }.buttonStyle(.plain)
                             Divider().padding(.leading, 62)
                             row(symbol: "arrow.counterclockwise", title: "バックアップを復元", value: nil) { showsRestoreConfirmation = true }
                         }.settingsCard()
@@ -86,6 +89,10 @@ struct SettingsView: View {
         .navigationTitle("設定").navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $addingVehicle) { NavigationStack { VehicleEditorView() } }
         .sheet(item: $editingVehicle) { vehicle in NavigationStack { VehicleEditorView(existing: vehicle) } }
+        .sheet(item: $backupExport) { backup in BackupShareSheet(url: backup.url) }
+        .alert("書き出しエラー", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: { Text(exportError ?? "") }
         .alert("カーログについて", isPresented: $showsAbout) { Button("OK", role: .cancel) { } } message: { Text("現在準備中です。") }
         .alert("バックアップを復元", isPresented: $showsRestoreConfirmation) {
             Button("キャンセル", role: .cancel) { }
@@ -121,6 +128,21 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 14).frame(minHeight: 70).contentShape(Rectangle())
     }
+}
+
+private struct BackupExport: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+private struct BackupShareSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) { }
 }
 
 private extension View {

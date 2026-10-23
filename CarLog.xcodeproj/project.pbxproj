@@ -20,6 +20,7 @@
 		A00000000000000000000111 /* ImageRecognition.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* ImageRecognition.swift */; };
 		B00000000000000000000101 /* CarLogWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* CarLogWidgets.swift */; };
 		B00000000000000000000102 /* CarLogWidgets.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* CarLogWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C00000000000000000000101 /* AppStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* AppStoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -29,6 +30,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = B00000000000000000000400;
 			remoteInfo = CarLogWidgets;
+		};
+		C00000000000000000000801 = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000500;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000400;
+			remoteInfo = CarLog;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -63,6 +71,8 @@
 		B00000000000000000000002 /* CarLogWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CarLogWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B00000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B00000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C00000000000000000000001 /* AppStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000002 /* CarLogTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = CarLogTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,6 +90,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C00000000000000000000201 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -89,6 +100,7 @@
 				A00000000000000000000301 /* CarLog */,
 				B00000000000000000000301 /* CarLogWidgets */,
 				A00000000000000000000306 /* Products */,
+				C00000000000000000000301 /* CarLogTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -148,6 +160,7 @@
 			children = (
 				A00000000000000000000010 /* CarLog.app */,
 				B00000000000000000000002 /* CarLogWidgets.appex */,
+				C00000000000000000000002 /* CarLogTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -167,6 +180,12 @@
 				B00000000000000000000003 /* Info.plist */,
 			);
 			path = CarLogWidgets;
+			sourceTree = "<group>";
+		};
+		C00000000000000000000301 /* CarLogTests */ = {
+			isa = PBXGroup;
+			children = (C00000000000000000000001 /* AppStoreTests.swift */, );
+			path = CarLogTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -208,6 +227,17 @@
 			productReference = B00000000000000000000002 /* CarLogWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		C00000000000000000000400 /* CarLogTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C00000000000000000000701;
+			buildPhases = (C00000000000000000000202, C00000000000000000000201, );
+			buildRules = ();
+			dependencies = (C00000000000000000000800, );
+			name = CarLogTests;
+			productName = CarLogTests;
+			productReference = C00000000000000000000002;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -242,6 +272,7 @@
 			targets = (
 				A00000000000000000000400 /* CarLog */,
 				B00000000000000000000400 /* CarLogWidgets */,
+				C00000000000000000000400 /* CarLogTests */,
 			);
 		};
 /* End PBXProject section */
@@ -290,6 +321,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C00000000000000000000202 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C00000000000000000000101, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -298,6 +330,7 @@
 			target = B00000000000000000000400 /* CarLogWidgets */;
 			targetProxy = B00000000000000000000801 /* PBXContainerItemProxy */;
 		};
+		C00000000000000000000800 = {isa = PBXTargetDependency; target = A00000000000000000000400; targetProxy = C00000000000000000000801; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -445,6 +478,42 @@
 			};
 			name = Release;
 		};
+		C00000000000000000000602 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Z59568B4QV;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks", );
+				PRODUCT_BUNDLE_IDENTIFIER = jp.WisGlide.CarLogTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CarLog.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CarLog";
+			};
+			name = Debug;
+		};
+		C00000000000000000000603 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = Z59568B4QV;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@loader_path/Frameworks", );
+				PRODUCT_BUNDLE_IDENTIFIER = jp.WisGlide.CarLogTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/CarLog.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/CarLog";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -472,6 +541,12 @@
 				B00000000000000000000602 /* Debug */,
 				B00000000000000000000603 /* Release */,
 			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C00000000000000000000701 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (C00000000000000000000602, C00000000000000000000603, );
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
