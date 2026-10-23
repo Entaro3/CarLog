@@ -61,87 +61,110 @@ final class AppStore: ObservableObject {
         data.fuels.filter { $0.vehicleID == vehicleID }.sorted { $0.date > $1.date }
     }
 
-    func addVehicle(_ vehicle: Vehicle) {
+    @discardableResult
+    func addVehicle(_ vehicle: Vehicle) -> Bool {
         var value = vehicle
+        value.initialOdometer = value.initialOdometer ?? value.odometer
         if data.vehicles.isEmpty { value.isPrimary = true }
-        if value.isPrimary { data.vehicles.indices.forEach { data.vehicles[$0].isPrimary = false } }
-        data.vehicles.append(value)
-        selectedVehicleID = value.id
-        save()
-    }
-
-    func updateVehicle(_ vehicle: Vehicle) {
-        guard let index = data.vehicles.firstIndex(where: { $0.id == vehicle.id }) else { return }
-        if vehicle.isPrimary { data.vehicles.indices.forEach { data.vehicles[$0].isPrimary = false } }
-        data.vehicles[index] = vehicle
-        save()
-    }
-
-    func deleteVehicle(_ vehicle: Vehicle) {
-        if let filename = vehicle.photoFilename { try? FileManager.default.removeItem(at: photoDirectoryURL.appendingPathComponent(filename)) }
-        data.vehicles.removeAll { $0.id == vehicle.id }
-        data.trips.removeAll { $0.vehicleID == vehicle.id }
-        data.fuels.removeAll { $0.vehicleID == vehicle.id }
-        if !data.vehicles.contains(where: \.isPrimary), !data.vehicles.isEmpty { data.vehicles[0].isPrimary = true }
-        selectedVehicleID = data.vehicles.first?.id
-        save()
-    }
-
-    func startingOdometer(vehicleID: UUID, editing trip: TripRecord?) -> Double {
-        let current = data.vehicles.first(where: { $0.id == vehicleID })?.odometer ?? 0
-        // Editing must reuse the record's starting reading, not today's reading.
-        guard let trip else { return current }
-        return (trip.odometer ?? current) - trip.distance
-    }
-
-    func addTrip(_ trip: TripRecord) {
-        data.trips.append(trip)
-        if let odometer = trip.odometer, let index = data.vehicles.firstIndex(where: { $0.id == trip.vehicleID }) {
-            data.vehicles[index].odometer = max(data.vehicles[index].odometer, odometer)
-        } else if let index = data.vehicles.firstIndex(where: { $0.id == trip.vehicleID }) {
-            data.vehicles[index].odometer += trip.distance
+        let saved = commit { candidate in
+            if value.isPrimary { candidate.vehicles.indices.forEach { candidate.vehicles[$0].isPrimary = false } }
+            candidate.vehicles.append(value)
         }
-        save()
+        if saved { selectedVehicleID = value.id }
+        return saved
     }
 
-    func updateTrip(_ trip: TripRecord) {
-        guard let index = data.trips.firstIndex(where: { $0.id == trip.id }) else { return }
-        let previous = data.trips[index]
-        data.trips[index] = trip
-        if let vehicleIndex = data.vehicles.firstIndex(where: { $0.id == trip.vehicleID }) {
-            if let odometer = trip.odometer {
-                let current = data.vehicles[vehicleIndex].odometer
-                if previous.odometer == current {
-                    let otherReadings = data.trips.filter { $0.vehicleID == trip.vehicleID && $0.id != trip.id }.compactMap(\.odometer)
-                        + data.fuels.filter { $0.vehicleID == trip.vehicleID }.map(\.odometer)
-                    data.vehicles[vehicleIndex].odometer = max(odometer, otherReadings.max() ?? odometer)
-                } else {
-                    data.vehicles[vehicleIndex].odometer = max(current, odometer)
-                }
-            } else if previous.odometer == nil {
-                data.vehicles[vehicleIndex].odometer = max(0, data.vehicles[vehicleIndex].odometer + trip.distance - previous.distance)
+    @discardableResult
+    func updateVehicle(_ vehicle: Vehicle, correctedOdometer: Double? = nil, correctionDate: Date = Date()) -> Bool {
+        guard let index = data.vehicles.firstIndex(where: { $0.id == vehicle.id }) else { return false }
+        return commit { candidate in
+            var value = vehicle
+            value.initialOdometer = value.initialOdometer ?? candidate.vehicles[index].initialOdometer
+            value.odometerCorrections = candidate.vehicles[index].odometerCorrections
+            if let correctedOdometer {
+                value.odometerCorrections = (value.odometerCorrections ?? []) + [
+                    OdometerCorrection(date: correctionDate, odometer: correctedOdometer)
+                ]
+            }
+            if value.isPrimary { candidate.vehicles.indices.forEach { candidate.vehicles[$0].isPrimary = false } }
+            candidate.vehicles[index] = value
+        }
+    }
+
+    @discardableResult
+    func deleteVehicle(_ vehicle: Vehicle) -> Bool {
+        let saved = commit { candidate in
+            candidate.vehicles.removeAll { $0.id == vehicle.id }
+            candidate.trips.removeAll { $0.vehicleID == vehicle.id }
+            candidate.fuels.removeAll { $0.vehicleID == vehicle.id }
+            if !candidate.vehicles.contains(where: \.isPrimary), !candidate.vehicles.isEmpty {
+                candidate.vehicles[0].isPrimary = true
             }
         }
-        save()
-    }
-
-    func deleteTrip(id: UUID) { data.trips.removeAll { $0.id == id }; save() }
-
-    func addFuel(_ fuel: FuelRecord) {
-        data.fuels.append(fuel)
-        if let index = data.vehicles.firstIndex(where: { $0.id == fuel.vehicleID }) {
-            data.vehicles[index].odometer = max(data.vehicles[index].odometer, fuel.odometer)
+        if saved {
+            if let filename = vehicle.photoFilename { try? FileManager.default.removeItem(at: photoDirectoryURL.appendingPathComponent(filename)) }
+            selectedVehicleID = data.vehicles.first?.id
         }
-        save()
+        return saved
     }
 
-    func updateFuel(_ fuel: FuelRecord) {
-        guard let index = data.fuels.firstIndex(where: { $0.id == fuel.id }) else { return }
-        data.fuels[index] = fuel
-        save()
+    @discardableResult
+    func addTrip(_ trip: TripRecord) -> Bool {
+        commit { $0.trips.append(trip) }
     }
 
-    func deleteFuel(id: UUID) { data.fuels.removeAll { $0.id == id }; save() }
+    @discardableResult
+    func updateTrip(_ trip: TripRecord) -> Bool {
+        guard let index = data.trips.firstIndex(where: { $0.id == trip.id }) else { return false }
+        return commit { $0.trips[index] = trip }
+    }
+
+    @discardableResult
+    func deleteTrip(id: UUID) -> Bool {
+        commit { $0.trips.removeAll { $0.id == id } }
+    }
+
+    // Replacing a same-day record (including an edited record) is one transaction.
+    @discardableResult
+    func replaceTrip(_ trip: TripRecord, removing id: UUID?) -> Bool {
+        commit { candidate in
+            if let id, id != trip.id { candidate.trips.removeAll { $0.id == id } }
+            if let index = candidate.trips.firstIndex(where: { $0.id == trip.id }) {
+                candidate.trips[index] = trip
+            } else {
+                candidate.trips.append(trip)
+            }
+        }
+    }
+
+    @discardableResult
+    func addFuel(_ fuel: FuelRecord) -> Bool {
+        commit { $0.fuels.append(fuel) }
+    }
+
+    @discardableResult
+    func updateFuel(_ fuel: FuelRecord) -> Bool {
+        guard let index = data.fuels.firstIndex(where: { $0.id == fuel.id }) else { return false }
+        return commit { $0.fuels[index] = fuel }
+    }
+
+    @discardableResult
+    func deleteFuel(id: UUID) -> Bool {
+        commit { $0.fuels.removeAll { $0.id == id } }
+    }
+
+    @discardableResult
+    func updateOdometerCorrection(vehicleID: UUID, correction: OdometerCorrection) -> Bool {
+        guard let vehicleIndex = data.vehicles.firstIndex(where: { $0.id == vehicleID }),
+              let correctionIndex = data.vehicles[vehicleIndex].odometerCorrections?.firstIndex(where: { $0.id == correction.id }) else { return false }
+        return commit { $0.vehicles[vehicleIndex].odometerCorrections?[correctionIndex] = correction }
+    }
+
+    @discardableResult
+    func deleteOdometerCorrection(vehicleID: UUID, id: UUID) -> Bool {
+        guard let index = data.vehicles.firstIndex(where: { $0.id == vehicleID }) else { return false }
+        return commit { $0.vehicles[index].odometerCorrections?.removeAll { $0.id == id } }
+    }
 
     func updateNotificationSettings(_ settings: NotificationSettings) {
         data.notificationSettings = settings
@@ -207,6 +230,7 @@ final class AppStore: ObservableObject {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         var restored = try decoder.decode(AppData.self, from: raw)
+        try Self.recalculateMileage(in: &restored)
         var stagedPhotos: [URL] = []
         do {
             for index in restored.vehicles.indices {
@@ -245,11 +269,179 @@ final class AppStore: ObservableObject {
             && !filename.contains("/") && !filename.contains("\\")
     }
 
+    private struct MileageError: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    private struct MileageEvent {
+        let id: UUID
+        let date: Date
+        let tripIndex: Int?
+        let odometer: Double?
+        let distance: Double
+        var isCorrection = false
+
+        static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
+            if lhs.date != rhs.date { return lhs.date < rhs.date }
+            if lhs.isCorrection != rhs.isCorrection { return !lhs.isCorrection }
+            // Date-only imports may share a timestamp. Count manual distances first,
+            // then readings in increasing order, with trips before fuel at equal ODO.
+            if (lhs.odometer == nil) != (rhs.odometer == nil) { return lhs.odometer == nil }
+            if let left = lhs.odometer, let right = rhs.odometer, left != right { return left < right }
+            if (lhs.tripIndex == nil) != (rhs.tripIndex == nil) { return lhs.tripIndex != nil }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
+
+    private static func recalculateMileage(in candidate: inout AppData) throws {
+        let vehicleIDs = Set(candidate.vehicles.map(\.id))
+        guard candidate.trips.allSatisfy({ vehicleIDs.contains($0.vehicleID) }),
+              candidate.fuels.allSatisfy({ vehicleIDs.contains($0.vehicleID) }) else {
+            throw MileageError("車両が存在しない記録があります。車両と記録を確認してください。")
+        }
+        for vehicleIndex in candidate.vehicles.indices {
+            let vehicle = candidate.vehicles[vehicleIndex]
+            let tripIndices = candidate.trips.indices.filter { candidate.trips[$0].vehicleID == vehicle.id }
+            let fuels = candidate.fuels.filter { $0.vehicleID == vehicle.id }
+            var events = tripIndices.map { index in
+                let trip = candidate.trips[index]
+                return MileageEvent(id: trip.id, date: trip.date, tripIndex: index,
+                                    odometer: trip.odometer, distance: trip.distance)
+            }
+            // Older app versions allowed saving a fuel entry without an ODO (zero).
+            // Such entries still count towards fuel costs but cannot anchor mileage.
+            events += fuels.filter { $0.odometer > 0 }.map {
+                MileageEvent(id: $0.id, date: $0.date, tripIndex: nil, odometer: $0.odometer, distance: 0)
+            }
+            events += (vehicle.odometerCorrections ?? []).map {
+                MileageEvent(id: $0.id, date: $0.date, tripIndex: nil, odometer: $0.odometer, distance: 0, isCorrection: true)
+            }
+            events.sort(by: MileageEvent.precedes)
+
+            if vehicle.initialOdometer == nil {
+                // Older JSON did not retain the registration reading. Infer it once
+                // from the first ODO trip's saved start, bounded by earlier fuel ODOs.
+                var manualDistance = 0.0
+                var inferred: Double?
+                var firstFuelStart: Double?
+                for event in events {
+                    if let reading = event.odometer {
+                        if event.tripIndex != nil {
+                            inferred = reading - event.distance - manualDistance
+                            break
+                        }
+                        if firstFuelStart == nil { firstFuelStart = reading - manualDistance }
+                    } else {
+                        manualDistance += event.distance
+                    }
+                }
+                let fallback = firstFuelStart ?? (vehicle.odometer - manualDistance)
+                candidate.vehicles[vehicleIndex].initialOdometer = max(0, min(inferred ?? fallback, firstFuelStart ?? inferred ?? fallback))
+            }
+            guard let initial = candidate.vehicles[vehicleIndex].initialOdometer,
+                  initial.isFinite, initial >= 0 else {
+                throw MileageError("\(vehicle.name)の登録時ODOは0以上の数値を入力してください。")
+            }
+            guard fuels.allSatisfy({ $0.odometer.isFinite && $0.odometer >= 0 }) else {
+                throw MileageError("給油記録のODOは0以上の数値を入力してください。")
+            }
+            var tripOdometer = initial
+            var vehicleOdometer = initial
+            var lastMeasuredOdometer = initial
+            for event in events {
+                if let reading = event.odometer {
+                    // Avoid rejecting decimal input because 0.1 + 0.2 is not exactly 0.3.
+                    let tolerance = 0.000001
+                    if event.isCorrection {
+                        guard reading.isFinite, reading >= 0, reading + tolerance >= lastMeasuredOdometer else {
+                            throw MileageError("ODO補正が以前の実測ODOより小さくなります。誤った走行・給油記録や補正履歴を先に修正してください。")
+                        }
+                        // An explicit correction can reduce drift from manual estimates.
+                        // It does not rewrite past manual entries or create a trip.
+                        if let index = candidate.vehicles[vehicleIndex].odometerCorrections?.firstIndex(where: { $0.id == event.id }) {
+                            candidate.vehicles[vehicleIndex].odometerCorrections?[index].previousOdometer = vehicleOdometer
+                        }
+                        tripOdometer = reading
+                        vehicleOdometer = reading
+                        lastMeasuredOdometer = reading
+                        continue
+                    }
+                    guard reading.isFinite, reading >= 0, reading + tolerance >= vehicleOdometer,
+                          event.tripIndex == nil || reading + tolerance >= tripOdometer else {
+                        throw MileageError("\(vehicle.name)のODOが前の記録より小さくなります。記録日時、ODO、走行距離を確認してください。")
+                    }
+                    if let index = event.tripIndex {
+                        // Fuel ODOs anchor the vehicle display, but do not consume
+                        // unrecorded travel from the next trip's distance.
+                        candidate.trips[index].distance = max(0, reading - tripOdometer)
+                        tripOdometer = reading
+                    }
+                    vehicleOdometer = reading
+                    lastMeasuredOdometer = reading
+                } else {
+                    guard event.distance.isFinite, event.distance > 0 else {
+                        throw MileageError("走行距離は0より大きい数値を入力してください。")
+                    }
+                    tripOdometer += event.distance
+                    vehicleOdometer += event.distance
+                    guard tripOdometer.isFinite, vehicleOdometer.isFinite else {
+                        throw MileageError("走行距離が大きすぎます。入力内容を確認してください。")
+                    }
+                }
+            }
+            candidate.vehicles[vehicleIndex].odometer = vehicleOdometer
+        }
+    }
+
+    private func commit(_ change: (inout AppData) -> Void) -> Bool {
+        var candidate = data
+        do {
+            // Freeze legacy baselines before editing/deleting the evidence used to infer them.
+            // Load/restore normally migrate already; this also handles loaded invalid history.
+            Self.migrateBaselines(in: &candidate)
+            change(&candidate)
+            try Self.recalculateMileage(in: &candidate)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(candidate).write(to: fileURL, options: .atomic)
+            data = candidate
+            lastError = nil
+            return true
+        } catch {
+            lastError = (error as? MileageError)?.localizedDescription ?? "データを保存できませんでした。入力内容や空き容量を確認してください。"
+            return false
+        }
+    }
+
+    private static func migrateBaselines(in candidate: inout AppData) {
+        guard candidate.vehicles.contains(where: { $0.initialOdometer == nil }) else { return }
+        var migrated = candidate
+        // Even if old history is contradictory, preserve any inferred baselines
+        // while leaving original entries intact for the user to correct.
+        try? recalculateMileage(in: &migrated)
+        for index in candidate.vehicles.indices where candidate.vehicles[index].initialOdometer == nil {
+            candidate.vehicles[index].initialOdometer = migrated.vehicles[index].initialOdometer
+        }
+    }
+
     private func load() {
         guard let raw = try? Data(contentsOf: fileURL) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        do { data = try decoder.decode(AppData.self, from: raw) }
+        do {
+            data = try decoder.decode(AppData.self, from: raw)
+            var recalculated = data
+            do {
+                try Self.recalculateMileage(in: &recalculated)
+                data = recalculated
+                save()
+            } catch {
+                Self.migrateBaselines(in: &data)
+                lastError = error.localizedDescription
+            }
+        }
         catch { lastError = "保存データを読み込めませんでした。" }
     }
 

@@ -159,6 +159,8 @@ struct VehicleEditorView: View {
     @State private var bodyType: BodyType
     @State private var fuelType: FuelType
     @State private var odometer: Double
+    @State private var currentOdometer: Double
+    @State private var editingCorrection: OdometerCorrection?
     @State private var primaryColor: Color
     @State private var secondaryColor: Color
     @State private var twoTone: Bool
@@ -170,13 +172,15 @@ struct VehicleEditorView: View {
     @State private var showsPhotoSource = false
     @State private var showsImagePicker = false
     @State private var imageSource: ImagePickerSource = .photoLibrary
+    @State private var validationMessage: String?
     private var theme: CarLogTheme { CarLogTheme(mood: mood, colorScheme: colorScheme) }
 
     init(existing: Vehicle? = nil) {
         self.existing = existing
         _name = State(initialValue: existing?.name ?? ""); _nickname = State(initialValue: existing?.nickname ?? "")
         _bodyType = State(initialValue: existing?.bodyType ?? .compact); _fuelType = State(initialValue: existing?.fuelType ?? .regular)
-        _odometer = State(initialValue: existing?.odometer ?? 0); _primaryColor = State(initialValue: Color(hex: existing?.primaryColorHex ?? "65B7EE"))
+        _odometer = State(initialValue: existing?.initialOdometer ?? existing?.odometer ?? 0); _primaryColor = State(initialValue: Color(hex: existing?.primaryColorHex ?? "65B7EE"))
+        _currentOdometer = State(initialValue: existing?.odometer ?? 0)
         _secondaryColor = State(initialValue: Color(hex: existing?.secondaryColorHex ?? "FFFFFF")); _twoTone = State(initialValue: existing?.secondaryColorHex != nil)
         _mood = State(initialValue: existing?.mood ?? .standard); _isPrimary = State(initialValue: existing?.isPrimary ?? false)
         _selectedPhoto = State(initialValue: nil)
@@ -191,13 +195,42 @@ struct VehicleEditorView: View {
                     VStack(spacing: 0) {
                         fieldRow("車両名") { TextField("マイカー", text: $name) }
                         Divider(); fieldRow("愛称") { TextField("ソラ", text: $nickname) }
-                        Divider(); fieldRow("オドメーター") { HStack { TextField("0", value: $odometer, format: .number.precision(.fractionLength(0))).keyboardType(.numberPad); Text("Km") } }
+                        if existing != nil {
+                            Divider(); fieldRow("現在のODO") {
+                                HStack { TextField("0", value: $currentOdometer, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad); Text("Km") }
+                            }
+                        }
+                        Divider(); fieldRow("登録時のODO") { HStack { TextField("0", value: $odometer, format: .number.precision(.fractionLength(0...1))).keyboardType(.decimalPad); Text("Km") } }
                         Divider(); fieldRow("燃料種類") { Picker("", selection: $fuelType) { ForEach(FuelType.allCases) { Text($0.rawValue).tag($0) } }.labelsHidden() }
                         Divider()
                         Button { showsColorPicker = true } label: {
                             HStack { Text("ボディカラー").foregroundStyle(.primary); Spacer(); Circle().fill(primaryColor).frame(width: 32, height: 32); Text(twoTone ? "ツートン" : "選択中").foregroundStyle(.primary); Image(systemName: "chevron.right").foregroundStyle(.secondary) }.padding(.horizontal, 18).frame(height: 62)
                         }.buttonStyle(.plain)
                     }.settingsCard()
+                    Text("登録時のODOは履歴の起点です。現在のODOを変更すると、保存時点の補正として記録し、以降の計算に反映します。")
+                        .font(.caption).foregroundStyle(CarLogStyle.label)
+                    if let existing,
+                       let corrections = store.data.vehicles.first(where: { $0.id == existing.id })?.odometerCorrections,
+                       !corrections.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("ODO補正履歴").font(.headline)
+                            ForEach(corrections.sorted { $0.date > $1.date }) { correction in
+                                Button { editingCorrection = correction } label: {
+                                    HStack {
+                                        Text(correction.date, format: .dateTime.year().month().day().hour().minute())
+                                        Spacer()
+                                        VStack(alignment: .trailing) {
+                                            Text(correction.odometer.formatted(.number.precision(.fractionLength(0...1))) + " Km")
+                                            if let adjustment = correction.adjustment {
+                                                Text(String(format: "補正 %+.1f Km", adjustment)).font(.caption).foregroundStyle(CarLogStyle.label)
+                                            }
+                                        }
+                                        Image(systemName: "chevron.right")
+                                    }.font(.subheadline)
+                                }.buttonStyle(.plain)
+                            }
+                        }.carLogCard()
+                    }
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("雰囲気").font(.headline).foregroundStyle(CarLogStyle.label)
@@ -207,7 +240,11 @@ struct VehicleEditorView: View {
                         VStack(alignment: .leading, spacing: 5) { Text("メイン車両").font(.headline); Text("ホームに表示する車両").font(.subheadline).foregroundStyle(CarLogStyle.label) }
                     }.tint(CarLogStyle.blue).carLogCard(padding: 18)
                     PrimaryActionButton(title: "変更を保存", action: save)
-                    if let existing, store.data.vehicles.count > 1 { Button("この車両を削除", role: .destructive) { store.deleteVehicle(existing); dismiss() }.padding() }
+                    if let existing, store.data.vehicles.count > 1 {
+                        Button("この車両を削除", role: .destructive) {
+                            finishSaving(store.deleteVehicle(existing))
+                        }.padding()
+                    }
                 }.padding(.horizontal, 18).padding(.vertical, 10).padding(.bottom, 24)
             }
         }
@@ -218,6 +255,11 @@ struct VehicleEditorView: View {
         }
         .sheet(isPresented: $showsColorPicker) { NavigationStack { BodyColorPickerView(primary: $primaryColor, secondary: $secondaryColor, twoTone: $twoTone, bodyType: bodyType) } }
         .sheet(isPresented: $showsImagePicker) { ImagePicker(source: imageSource) { selectedPhoto = $0; photoWasChanged = true } }
+        .sheet(item: $editingCorrection) { correction in
+            if let existing {
+                NavigationStack { OdometerCorrectionEditorView(vehicleID: existing.id, correction: correction) }
+            }
+        }
         .confirmationDialog("車両写真を変更", isPresented: $showsPhotoSource, titleVisibility: .visible) {
             Button("カメラで撮影") { imageSource = .camera; showsImagePicker = true }
             Button("写真ライブラリから選択") { imageSource = .photoLibrary; showsImagePicker = true }
@@ -226,6 +268,14 @@ struct VehicleEditorView: View {
         .environment(\.carLogTheme, theme)
         .tint(theme.accent)
         .onAppear { if selectedPhoto == nil { selectedPhoto = AppStore.vehiclePhoto(filename: existing?.photoFilename) } }
+        .onChange(of: store.data.vehicles) { _, vehicles in
+            if let existing, let updated = vehicles.first(where: { $0.id == existing.id }) {
+                currentOdometer = updated.odometer
+            }
+        }
+        .alert("入力内容を確認してください", isPresented: Binding(get: { validationMessage != nil }, set: { if !$0 { validationMessage = nil } })) {
+            Button("OK", role: .cancel) { validationMessage = nil }
+        } message: { Text(validationMessage ?? "") }
     }
 
     private var preview: some View {
@@ -253,8 +303,69 @@ struct VehicleEditorView: View {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         let id = existing?.id ?? UUID()
         let photoFilename = photoWasChanged ? selectedPhoto.flatMap { store.saveVehiclePhoto($0, vehicleID: id) } : existing?.photoFilename
-        let value = Vehicle(id: id, name: name, nickname: nickname, bodyType: bodyType, fuelType: fuelType, odometer: odometer, primaryColorHex: primaryColor.hexString(), secondaryColorHex: twoTone ? secondaryColor.hexString() : nil, mood: mood, isPrimary: isPrimary, createdAt: existing?.createdAt ?? Date(), photoFilename: photoFilename)
-        if existing == nil { store.addVehicle(value) } else { store.updateVehicle(value) }; dismiss()
+        let value = Vehicle(id: id, name: name, nickname: nickname, bodyType: bodyType, fuelType: fuelType, odometer: existing?.odometer ?? odometer, primaryColorHex: primaryColor.hexString(), secondaryColorHex: twoTone ? secondaryColor.hexString() : nil, mood: mood, isPrimary: isPrimary, createdAt: existing?.createdAt ?? Date(), photoFilename: photoFilename, initialOdometer: odometer)
+        let previousOdometer = store.data.vehicles.first(where: { $0.id == id })?.odometer
+        let correction: Double? = existing != nil && currentOdometer != previousOdometer ? currentOdometer : nil
+        finishSaving(existing == nil ? store.addVehicle(value) : store.updateVehicle(value, correctedOdometer: correction))
+    }
+
+    private func finishSaving(_ saved: Bool) {
+        if saved { dismiss() }
+        else {
+            validationMessage = store.lastError ?? "車両を保存できませんでした。"
+            store.lastError = nil
+        }
+    }
+}
+
+private struct OdometerCorrectionEditorView: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    let vehicleID: UUID
+    let correction: OdometerCorrection
+    @State private var date: Date
+    @State private var odometer: Double
+    @State private var errorMessage: String?
+
+    init(vehicleID: UUID, correction: OdometerCorrection) {
+        self.vehicleID = vehicleID
+        self.correction = correction
+        _date = State(initialValue: correction.date)
+        _odometer = State(initialValue: correction.odometer)
+    }
+
+    var body: some View {
+        Form {
+            DatePicker("補正日時", selection: $date, displayedComponents: [.date, .hourAndMinute])
+            LabeledNumberField(title: "補正後のODO", unit: "Km", value: $odometer)
+            Button("補正を削除", role: .destructive) {
+                finishSaving(store.deleteOdometerCorrection(vehicleID: vehicleID, id: correction.id))
+            }
+        }
+        .navigationTitle("ODO補正を編集")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("キャンセル") { dismiss() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") {
+                    var updated = correction
+                    updated.date = date
+                    updated.odometer = odometer
+                    finishSaving(store.updateOdometerCorrection(vehicleID: vehicleID, correction: updated))
+                }
+            }
+        }
+        .alert("入力内容を確認してください", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: { Text(errorMessage ?? "") }
+    }
+
+    private func finishSaving(_ saved: Bool) {
+        if saved { dismiss() }
+        else {
+            errorMessage = store.lastError ?? "ODO補正を保存できませんでした。"
+            store.lastError = nil
+        }
     }
 }
 

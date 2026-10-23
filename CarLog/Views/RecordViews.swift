@@ -51,9 +51,7 @@ struct RecordsView: View {
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(trip.date, format: .dateTime.month().day().weekday(.abbreviated)).font(.headline).foregroundStyle(CarLogStyle.deepBlue)
-                            if trip.mode == .odometer {
-                                Text(trip.date, format: .dateTime.hour().minute()).font(.caption).foregroundStyle(CarLogStyle.label)
-                            }
+                            Text(trip.date, format: .dateTime.hour().minute()).font(.caption).foregroundStyle(CarLogStyle.label)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                         VStack(alignment: .trailing, spacing: 3) {
                             Text(trip.distance.formatted(.number.precision(.fractionLength(1))) + " Km").font(.title3.bold()).foregroundStyle(.primary).lineLimit(1).minimumScaleFactor(0.75)
@@ -186,12 +184,16 @@ struct TripEditorView: View {
                             Spacer(); Image(systemName: "chevron.right").foregroundStyle(CarLogStyle.blue)
                         }.carLogCard(padding: 12)
                     }.buttonStyle(.plain)
-                    DatePicker(modeIndex == 1 ? "日時" : "日付", selection: $date, displayedComponents: modeIndex == 1 ? [.date, .hourAndMinute] : .date).font(.headline).carLogCard()
+                    DatePicker("日時", selection: $date, displayedComponents: [.date, .hourAndMinute]).font(.headline).carLogCard()
                     LabeledNumberField(title: modeIndex == 0 ? "距離" : "オドメーター", unit: "Km", value: modeIndex == 0 ? $distance : $odometer).carLogCard()
                     TextField("目的（任意）", text: $purpose).carLogCard()
                     TextField("メモ（任意）", text: $note, axis: .vertical).carLogCard()
                     PrimaryActionButton(title: "記録を保存", action: save)
-                    if let existing { Button("この記録を削除", role: .destructive) { store.deleteTrip(id: existing.id); dismiss() }.padding() }
+                    if let existing {
+                        Button("この記録を削除", role: .destructive) {
+                            finishSaving(store.deleteTrip(id: existing.id))
+                        }.padding()
+                    }
                 }.padding(18)
             }
         }
@@ -235,15 +237,14 @@ struct TripEditorView: View {
     }
 
     private func save() {
-        let startingOdometer = store.startingOdometer(vehicleID: vehicleID, editing: existing)
-        let computedDistance = modeIndex == 0 ? distance : odometer - startingOdometer
-        guard computedDistance > 0 else {
+        guard modeIndex == 0 ? (distance.isFinite && distance > 0) : (odometer.isFinite && odometer >= 0) else {
             validationMessage = modeIndex == 0
                 ? "走行距離を0より大きい数値で入力してください。"
-                : "オドメーターは走行開始時の値（\(startingOdometer.formatted(.number.precision(.fractionLength(0...1)))) Km）より大きい数値を入力してください。"
+                : "オドメーターは0以上の数値を入力してください。"
             return
         }
-        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: computedDistance, odometer: modeIndex == 1 ? odometer : nil, mode: mode, purpose: purpose, note: note)
+        // ODO distances are derived centrally using the complete dated history.
+        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: modeIndex == 0 ? distance : 0, odometer: modeIndex == 1 ? odometer : nil, mode: mode, purpose: purpose, note: note)
         if modeIndex == 0,
            let duplicate = store.trips(for: vehicleID).first(where: { $0.mode != .odometer && $0.id != value.id && Calendar.current.isDate($0.date, inSameDayAs: date) }) {
             pendingDistanceRecord = value
@@ -251,17 +252,24 @@ struct TripEditorView: View {
             showsDistanceOverwriteConfirmation = true
             return
         }
-        existing == nil ? store.addTrip(value) : store.updateTrip(value); dismiss()
+        finishSaving(existing == nil ? store.addTrip(value) : store.updateTrip(value))
     }
 
     private func overwriteDistanceRecord() {
         guard var pending = pendingDistanceRecord, let duplicate = distanceRecordToOverwrite else { return }
-        if let existing, existing.id != duplicate.id { store.deleteTrip(id: existing.id) }
         pending.id = duplicate.id
-        store.updateTrip(pending)
+        let saved = store.replaceTrip(pending, removing: existing?.id)
         pendingDistanceRecord = nil
         distanceRecordToOverwrite = nil
-        dismiss()
+        finishSaving(saved)
+    }
+
+    private func finishSaving(_ saved: Bool) {
+        if saved { dismiss() }
+        else {
+            validationMessage = store.lastError ?? "記録を保存できませんでした。"
+            store.lastError = nil
+        }
     }
 
     private var mismatchTitle: String { modeIndex == 0 ? "ODO画面に見えます" : "TRIP画面に見えます" }
@@ -356,6 +364,7 @@ struct FuelEditorView: View {
     @State private var isRecognizingMeter = false
     @State private var meterError: String?
     @State private var showsMeterMismatch = false
+    @State private var validationMessage: String?
 
     init(vehicleID: UUID, existing: FuelRecord? = nil) {
         self.vehicleID = vehicleID; self.existing = existing
@@ -377,12 +386,18 @@ struct FuelEditorView: View {
                             Image(systemName: "camera.fill").font(.title2).foregroundStyle(.white).frame(width: 54, height: 54).background(CarLogStyle.blue, in: RoundedRectangle(cornerRadius: 12))
                         }.buttonStyle(.plain).accessibilityLabel("オドメーターを撮影")
                     }.carLogCard()
+                    Text("ODOが未入力（0）の場合、車両ODOの更新には使用しません。")
+                        .font(.caption).foregroundStyle(CarLogStyle.label)
                     HStack(spacing: 10) { LabeledNumberField(title: "給油量", unit: "L", value: $liters).carLogCard(); LabeledNumberField(title: "1Lあたり", unit: "円", value: unitPriceBinding).carLogCard() }
                     LabeledNumberField(title: "支払金額", unit: "円", value: $totalPrice).carLogCard()
                     TextField("ガソリンスタンド", text: $station).carLogCard()
                     Toggle(isOn: $isFull) { VStack(alignment: .leading) { Text("満タン給油").font(.headline); Text("部分給油の場合はオフ").font(.subheadline).foregroundStyle(CarLogStyle.label) } }.tint(CarLogStyle.blue).carLogCard()
                     PrimaryActionButton(title: "給油記録を保存", action: save)
-                    if let existing { Button("この記録を削除", role: .destructive) { store.deleteFuel(id: existing.id); dismiss() }.padding() }
+                    if let existing {
+                        Button("この記録を削除", role: .destructive) {
+                            finishSaving(store.deleteFuel(id: existing.id))
+                        }.padding()
+                    }
                 }.padding(18)
             }
         }
@@ -429,10 +444,28 @@ struct FuelEditorView: View {
         .overlay { if isRecognizing || isRecognizingMeter { ZStack { Color.black.opacity(0.18).ignoresSafeArea(); ProgressView(isRecognizingMeter ? "メーターを読み取っています…" : "レシートを読み取っています…").padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } } }
         .alert("読み取りできませんでした", isPresented: Binding(get: { recognitionError != nil }, set: { if !$0 { recognitionError = nil } })) { Button("OK", role: .cancel) { recognitionError = nil } } message: { Text(recognitionError ?? "別の画像を選択するか、手入力してください。") }
         .alert("メーターを読み取れませんでした", isPresented: Binding(get: { meterError != nil }, set: { if !$0 { meterError = nil } })) { Button("OK", role: .cancel) { meterError = nil } } message: { Text(meterError ?? "ODOがはっきり写るように撮影してください。") }
+        .alert("入力内容を確認してください", isPresented: Binding(get: { validationMessage != nil }, set: { if !$0 { validationMessage = nil } })) {
+            Button("OK", role: .cancel) { validationMessage = nil }
+        } message: { Text(validationMessage ?? "") }
     }
 
     private var unitPriceBinding: Binding<Double> { Binding(get: { liters > 0 ? totalPrice / liters : 0 }, set: { totalPrice = $0 * liters }) }
-    private func save() { guard liters > 0, totalPrice > 0 else { return }; let value = FuelRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, liters: liters, totalPrice: totalPrice, odometer: odometer, isFull: isFull, station: station, note: note); existing == nil ? store.addFuel(value) : store.updateFuel(value); dismiss() }
+    private func save() {
+        guard liters.isFinite, liters > 0, totalPrice.isFinite, totalPrice > 0 else {
+            validationMessage = "給油量と支払金額は0より大きい数値を入力してください。"
+            return
+        }
+        let value = FuelRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, liters: liters, totalPrice: totalPrice, odometer: odometer, isFull: isFull, station: station, note: note)
+        finishSaving(existing == nil ? store.addFuel(value) : store.updateFuel(value))
+    }
+
+    private func finishSaving(_ saved: Bool) {
+        if saved { dismiss() }
+        else {
+            validationMessage = store.lastError ?? "記録を保存できませんでした。"
+            store.lastError = nil
+        }
+    }
     private func retakeReceipt() {
         receiptScan = nil
         imageSource = .camera

@@ -57,6 +57,19 @@ struct Vehicle: Identifiable, Codable, Hashable {
     var isPrimary: Bool
     var createdAt = Date()
     var photoFilename: String? = nil
+    // Stable starting value; odometer is derived from this and the history.
+    // Optional so existing JSON remains readable until migration.
+    var initialOdometer: Double? = nil
+    var odometerCorrections: [OdometerCorrection]? = nil
+}
+
+struct OdometerCorrection: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var date: Date
+    var odometer: Double
+    var previousOdometer: Double? = nil
+
+    var adjustment: Double? { previousOdometer.map { odometer - $0 } }
 }
 
 enum AppAppearance: String, Codable, CaseIterable, Identifiable {
