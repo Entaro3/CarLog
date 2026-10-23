@@ -161,7 +161,7 @@ struct TripEditorView: View {
         self.vehicleID = vehicleID; self.existing = existing
         _date = State(initialValue: existing?.date ?? Date()); _distance = State(initialValue: existing?.distance ?? 0); _odometer = State(initialValue: existing?.odometer ?? 0)
         _mode = State(initialValue: existing?.mode ?? .odometer); _purpose = State(initialValue: existing?.purpose ?? ""); _note = State(initialValue: existing?.note ?? "")
-        _modeIndex = State(initialValue: existing == nil || existing?.mode == .odometer ? 1 : 0)
+        _modeIndex = State(initialValue: existing == nil ? 1 : 0)
     }
 
     var body: some View {
@@ -170,22 +170,28 @@ struct TripEditorView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     if let vehicle = store.data.vehicles.first(where: { $0.id == vehicleID }) { VehicleSummaryRow(vehicle: vehicle, showsOdometer: true, showsChevron: false).carLogCard(padding: 12) }
-                    Picker("入力方法", selection: $modeIndex) {
-                        Text("走行距離").tag(0)
-                        Text("ODOメーター").tag(1)
-                    }.pickerStyle(.segmented).labelsHidden().onChange(of: modeIndex) { _, value in mode = value == 0 ? .distance : .odometer }
-                    Button { showsMeterSource = true } label: {
-                        HStack(spacing: 16) {
-                            Image(systemName: "camera").font(.title2).foregroundStyle(CarLogStyle.blue).frame(width: 48, height: 48).background(CarLogStyle.softBlue, in: Circle())
-                            VStack(alignment: .leading) {
-                                Text("メーターを撮影").font(.headline).foregroundStyle(CarLogStyle.blue)
-                                Text(modeIndex == 0 ? "TRIP A・TRIP Bから走った距離を読み取ります" : "ODOから総走行距離を読み取ります").font(.subheadline).foregroundStyle(CarLogStyle.label)
-                            }
-                            Spacer(); Image(systemName: "chevron.right").foregroundStyle(CarLogStyle.blue)
-                        }.carLogCard(padding: 12)
-                    }.buttonStyle(.plain)
+                    if existing == nil {
+                        Picker("入力方法", selection: $modeIndex) {
+                            Text("走行距離").tag(0)
+                            Text("ODOメーター").tag(1)
+                        }.pickerStyle(.segmented).labelsHidden().onChange(of: modeIndex) { _, value in mode = value == 0 ? .distance : .odometer }
+                        Button { showsMeterSource = true } label: {
+                            HStack(spacing: 16) {
+                                Image(systemName: "camera").font(.title2).foregroundStyle(CarLogStyle.blue).frame(width: 48, height: 48).background(CarLogStyle.softBlue, in: Circle())
+                                VStack(alignment: .leading) {
+                                    Text("メーターを撮影").font(.headline).foregroundStyle(CarLogStyle.blue)
+                                    Text(modeIndex == 0 ? "TRIP A・TRIP Bから走った距離を読み取ります" : "ODOから総走行距離を読み取ります").font(.subheadline).foregroundStyle(CarLogStyle.label)
+                                }
+                                Spacer(); Image(systemName: "chevron.right").foregroundStyle(CarLogStyle.blue)
+                            }.carLogCard(padding: 12)
+                        }.buttonStyle(.plain)
+                    }
                     DatePicker("日時", selection: $date, displayedComponents: [.date, .hourAndMinute]).font(.headline).carLogCard()
                     LabeledNumberField(title: modeIndex == 0 ? "距離" : "オドメーター", unit: "Km", value: modeIndex == 0 ? $distance : $odometer).carLogCard()
+                    if let enteredOdometer = existing?.odometer {
+                        Text("入力時のODO（参考）：" + enteredOdometer.formatted(.number.precision(.fractionLength(0...1))) + " Km")
+                            .font(.caption).foregroundStyle(CarLogStyle.label)
+                    }
                     TextField("目的（任意）", text: $purpose).carLogCard()
                     TextField("メモ（任意）", text: $note, axis: .vertical).carLogCard()
                     PrimaryActionButton(title: "記録を保存", action: save)
@@ -237,15 +243,15 @@ struct TripEditorView: View {
     }
 
     private func save() {
-        guard modeIndex == 0 ? (distance.isFinite && distance > 0) : (odometer.isFinite && odometer >= 0) else {
+        guard modeIndex == 0 ? (distance.isFinite && (distance > 0 || (existing?.odometer != nil && distance == 0))) : (odometer.isFinite && odometer >= 0) else {
             validationMessage = modeIndex == 0
                 ? "走行距離を0より大きい数値で入力してください。"
                 : "オドメーターは0以上の数値を入力してください。"
             return
         }
-        // ODO distances are derived centrally using the complete dated history.
-        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: modeIndex == 0 ? distance : 0, odometer: modeIndex == 1 ? odometer : nil, mode: mode, purpose: purpose, note: note)
-        if modeIndex == 0,
+        // A new ODO entry uses the vehicle current value; edits change saved distance only.
+        let value = TripRecord(id: existing?.id ?? UUID(), vehicleID: vehicleID, date: date, distance: modeIndex == 0 ? distance : 0, odometer: existing?.odometer ?? (modeIndex == 1 ? odometer : nil), mode: existing?.mode ?? mode, purpose: purpose, note: note)
+        if value.odometer == nil,
            let duplicate = store.trips(for: vehicleID).first(where: { $0.mode != .odometer && $0.id != value.id && Calendar.current.isDate($0.date, inSameDayAs: date) }) {
             pendingDistanceRecord = value
             distanceRecordToOverwrite = duplicate
@@ -386,7 +392,7 @@ struct FuelEditorView: View {
                             Image(systemName: "camera.fill").font(.title2).foregroundStyle(.white).frame(width: 54, height: 54).background(CarLogStyle.blue, in: RoundedRectangle(cornerRadius: 12))
                         }.buttonStyle(.plain).accessibilityLabel("オドメーターを撮影")
                     }.carLogCard()
-                    Text("ODOが未入力（0）の場合、車両ODOの更新には使用しません。")
+                    Text("給油時のODOは燃費計算に使用します。車両のODOは走行記録で更新します。")
                         .font(.caption).foregroundStyle(CarLogStyle.label)
                     HStack(spacing: 10) { LabeledNumberField(title: "給油量", unit: "L", value: $liters).carLogCard(); LabeledNumberField(title: "1Lあたり", unit: "円", value: unitPriceBinding).carLogCard() }
                     LabeledNumberField(title: "支払金額", unit: "円", value: $totalPrice).carLogCard()

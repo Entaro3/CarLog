@@ -46,7 +46,6 @@ final class AppStoreTests: XCTestCase {
         var record = trip(car)
         store.addTrip(record)
         record.note = "Updated note"
-        record.distance = 0 // The store, not the editor, derives ODO distances.
         store.updateTrip(record)
         XCTAssertEqual(store.data.trips.first?.distance, 100)
         XCTAssertEqual(store.data.trips.first?.note, "Updated note")
@@ -64,16 +63,16 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedVehicle?.odometer, 1300)
     }
 
-    @MainActor func testCorrectingLatestOdometerDownwardUpdatesVehicle() async throws {
+    @MainActor func testEditingOdoRecordDistanceDownwardUpdatesVehicle() async throws {
         let (store, _) = try makeStore()
         let car = vehicle()
         store.addVehicle(car)
         var record = trip(car)
         store.addTrip(record)
-        record.odometer = 1090
         record.distance = 90
         store.updateTrip(record)
         XCTAssertEqual(store.selectedVehicle?.odometer, 1090)
+        XCTAssertEqual(store.data.trips.first?.odometer, 1100)
     }
 
     @MainActor func testPartialFillIsIncludedBetweenFullTanksAndOtherCarsAreExcluded() async throws {
@@ -116,15 +115,16 @@ final class AppStoreTests: XCTestCase {
         XCTAssertNil(store.averageFuelEfficiency(for: [first]))
     }
 
-    @MainActor func testInvalidLatestOdometerDoesNotFallBackToOlderFullTank() async throws {
+    @MainActor func testDescendingFuelOdoDoesNotChangeVehicleMileage() async throws {
         let (store, _) = try makeStore()
         let car = vehicle()
         XCTAssertTrue(store.addVehicle(car))
         store.addFuel(fuel(car, day: 1, odometer: 1000))
         store.addFuel(fuel(car, day: 2, odometer: 1400))
         let invalid = fuel(car, day: 3, odometer: 1300)
-        XCTAssertFalse(store.addFuel(invalid))
-        XCTAssertEqual(store.data.fuels.count, 2)
+        XCTAssertTrue(store.addFuel(invalid))
+        XCTAssertEqual(store.data.fuels.count, 3)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
         XCTAssertNil(store.fuelEfficiency(for: invalid))
     }
 
@@ -217,344 +217,252 @@ final class AppStoreTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: photos.path), [])
     }
 
-    private func datedTrip(_ car: Vehicle, day: Int, distance: Double = 0, odometer: Double? = nil) -> TripRecord {
+    private func distanceTrip(_ car: Vehicle, distance: Double, day: Int = 1) -> TripRecord {
         TripRecord(vehicleID: car.id, date: Date(timeIntervalSince1970: Double(day) * 86400),
-                   distance: distance, odometer: odometer, mode: odometer == nil ? .distance : .odometer,
-                   purpose: "", note: "")
+                   distance: distance, odometer: nil, mode: .distance, purpose: "", note: "")
     }
 
-    @MainActor func testMixedManualDistanceEditsAndDeletionKeepMeasuredOdometer() async throws {
+    @MainActor func testDeleteAndRegisterActualOdoAgainRestoresTheDistance() async throws {
         let (store, _) = try makeStore()
-        let car = vehicle()
+        let car = vehicle(odometer: 10000)
         XCTAssertTrue(store.addVehicle(car))
-        var manual = datedTrip(car, day: 1, distance: 30)
-        let measured = datedTrip(car, day: 2, odometer: 1100)
-        XCTAssertTrue(store.addTrip(manual))
-        XCTAssertTrue(store.addTrip(measured))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 70)
-        manual.distance = 40
-        XCTAssertTrue(store.updateTrip(manual))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 60)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-        XCTAssertTrue(store.deleteTrip(id: manual.id))
-        XCTAssertEqual(store.data.trips.first?.distance, 100)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-    }
-
-    @MainActor func testEditingAndDeletingEarlierOdoRecomputesFollowingTrip() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        var first = datedTrip(car, day: 1, odometer: 1100)
-        let second = datedTrip(car, day: 2, odometer: 1300)
+        let first = trip(car, odometer: 10100, distance: 999)
+        let second = trip(car, odometer: 10180, distance: 999)
         XCTAssertTrue(store.addTrip(first))
         XCTAssertTrue(store.addTrip(second))
-        first.odometer = 1150
-        XCTAssertTrue(store.updateTrip(first))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == first.id })?.distance, 150)
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == second.id })?.distance, 150)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1300)
+        XCTAssertEqual(store.data.trips.map(\.distance), [100, 80])
         XCTAssertTrue(store.deleteTrip(id: first.id))
-        XCTAssertEqual(store.data.trips.first?.distance, 300)
-        XCTAssertTrue(store.deleteTrip(id: second.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
-    }
-
-    @MainActor func testDeletingLatestOdoKeepsRemainingManualDistance() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        let first = datedTrip(car, day: 1, odometer: 1100)
-        let manual = datedTrip(car, day: 2, distance: 30)
-        let last = datedTrip(car, day: 3, odometer: 1200)
-        [first, manual, last].forEach { XCTAssertTrue(store.addTrip($0)) }
-        XCTAssertTrue(store.deleteTrip(id: last.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1130)
-        XCTAssertTrue(store.deleteTrip(id: first.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1030)
-    }
-
-    @MainActor func testManualDistanceAfterLastReadingIsAddedAndRemoved() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, odometer: 1100)))
-        var manual = datedTrip(car, day: 2, distance: 30)
-        XCTAssertTrue(store.addTrip(manual))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1130)
-        manual.distance = 45
-        XCTAssertTrue(store.updateTrip(manual))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1145)
-        XCTAssertTrue(store.deleteTrip(id: manual.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-    }
-
-    @MainActor func testBackdatedInsertAndDateChangeReorderHistory() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        let last = datedTrip(car, day: 3, odometer: 1300)
-        XCTAssertTrue(store.addTrip(last))
-        var manual = datedTrip(car, day: 2, distance: 40)
-        XCTAssertTrue(store.addTrip(manual))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == last.id })?.distance, 260)
-        manual.date = Date(timeIntervalSince1970: 4 * 86400)
-        XCTAssertTrue(store.updateTrip(manual))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == last.id })?.distance, 300)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1340)
-    }
-
-    @MainActor func testSwitchingInputModesRecomputesLaterDistances() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        var first = datedTrip(car, day: 1, distance: 30)
-        let last = datedTrip(car, day: 2, odometer: 1100)
-        XCTAssertTrue(store.addTrip(first))
-        XCTAssertTrue(store.addTrip(last))
-        first.odometer = 1040
-        first.mode = .odometer
-        first.distance = 0
-        XCTAssertTrue(store.updateTrip(first))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == last.id })?.distance, 60)
-        first.odometer = nil
-        first.mode = .distance
-        first.distance = 20
-        XCTAssertTrue(store.updateTrip(first))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == last.id })?.distance, 80)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-    }
-
-    @MainActor func testFuelOdoEditAndDeletionRecomputeVehicleWithoutDoubleCountingTrips() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        var fill = fuel(car, day: 1, odometer: 1050)
-        XCTAssertTrue(store.addFuel(fill))
-        let measured = datedTrip(car, day: 2, odometer: 1100)
-        XCTAssertTrue(store.addTrip(measured))
-        // Fuel records must not consume distance from a later driving record.
-        XCTAssertEqual(store.data.trips.first?.distance, 100)
-        fill.odometer = 1080
-        XCTAssertTrue(store.updateFuel(fill))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-        XCTAssertTrue(store.deleteTrip(id: measured.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1080)
-        fill.odometer = 1060
-        XCTAssertTrue(store.updateFuel(fill))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1060)
-        XCTAssertTrue(store.deleteFuel(id: fill.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
-    }
-
-    @MainActor func testFuelAnchorAbsorbsEarlierManualChangesButKeepsLaterManualDistance() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        var before = datedTrip(car, day: 1, distance: 30)
-        XCTAssertTrue(store.addTrip(before))
-        let fill = fuel(car, day: 2, odometer: 1100)
-        XCTAssertTrue(store.addFuel(fill))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 3, distance: 20)))
-        before.distance = 50
-        XCTAssertTrue(store.updateTrip(before))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1120)
-        XCTAssertTrue(store.deleteFuel(id: fill.id))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1070)
-    }
-
-    @MainActor func testContradictoryEditLeavesHistoryAndFileUntouched() async throws {
-        let (store, directory) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        var manual = datedTrip(car, day: 1, distance: 30)
-        XCTAssertTrue(store.addTrip(manual))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 2, odometer: 1100)))
-        let original = try Data(contentsOf: directory.appendingPathComponent("data.json"))
-        manual.distance = 150
-        XCTAssertFalse(store.updateTrip(manual))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == manual.id })?.distance, 30)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("data.json")), original)
-        XCTAssertNotNil(store.lastError)
-    }
-
-    @MainActor func testSameTimestampOrderIsStableAcrossReload() async throws {
-        let (store, directory) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        let measured = datedTrip(car, day: 1, odometer: 1100)
-        XCTAssertTrue(store.addTrip(measured))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, distance: 30)))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 70)
-        let reloaded = AppStore(fileURL: directory.appendingPathComponent("data.json"))
-        XCTAssertEqual(reloaded.data.trips.first(where: { $0.id == measured.id })?.distance, 70)
-        XCTAssertEqual(reloaded.selectedVehicle?.odometer, 1100)
-    }
-
-    @MainActor func testChangingRegistrationOdoRecomputesFirstSegmentOnly() async throws {
-        let (store, _) = try makeStore()
-        var car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, odometer: 1100)))
-        car.initialOdometer = 1020
-        XCTAssertTrue(store.updateVehicle(car))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 10080)
         XCTAssertEqual(store.data.trips.first?.distance, 80)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
+        XCTAssertEqual(store.data.trips.first?.odometer, 10180)
+        let replacement = trip(car, odometer: 10180)
+        XCTAssertTrue(store.addTrip(replacement))
+        XCTAssertEqual(store.data.trips.last?.distance, 100)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 10180)
     }
 
-    @MainActor func testLegacyBaselineMigratesOnceAndSurvivesDeletingAllRecords() async throws {
-        let (_, directory) = try makeStore()
-        var legacy = AppData()
-        let car = vehicle(odometer: 1120)
-        let measured = datedTrip(car, day: 2, distance: 70, odometer: 1100)
-        let manual = datedTrip(car, day: 1, distance: 30)
-        let tail = datedTrip(car, day: 3, distance: 20)
-        legacy.vehicles = [car]
-        legacy.trips = [tail, measured, manual]
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let url = directory.appendingPathComponent("data.json")
-        try encoder.encode(legacy).write(to: url)
-        let migrated = AppStore(fileURL: url)
-        XCTAssertEqual(migrated.selectedVehicle?.initialOdometer, 1000)
-        XCTAssertEqual(migrated.selectedVehicle?.odometer, 1120)
-        for record in [tail, measured, manual] { XCTAssertTrue(migrated.deleteTrip(id: record.id)) }
-        XCTAssertEqual(migrated.selectedVehicle?.odometer, 1000)
-        let reloaded = AppStore(fileURL: url)
-        XCTAssertEqual(reloaded.selectedVehicle?.initialOdometer, 1000)
-        XCTAssertEqual(reloaded.selectedVehicle?.odometer, 1000)
+    @MainActor func testEditingOldDistanceAppliesOnlyItsDeltaAndKeepsOtherRecords() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle(odometer: 10000)
+        XCTAssertTrue(store.addVehicle(car))
+        var first = trip(car, odometer: 10100)
+        let second = trip(car, odometer: 10180)
+        XCTAssertTrue(store.addTrip(first))
+        XCTAssertTrue(store.addTrip(second))
+        let later = try XCTUnwrap(store.data.trips.last)
+        first.distance = 120
+        first.odometer = nil // Editing cannot discard or re-interpret the original ODO.
+        first.mode = .distance
+        XCTAssertTrue(store.updateTrip(first))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 10200)
+        XCTAssertEqual(store.data.trips.first?.odometer, 10100)
+        XCTAssertEqual(store.data.trips.first?.mode, .odometer)
+        XCTAssertEqual(store.data.trips.last, later)
+        first.distance = 80
+        XCTAssertTrue(store.updateTrip(first))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 10160)
+        XCTAssertEqual(store.data.trips.last, later)
     }
 
-    @MainActor func testManualOnlyLegacyBaselineAndVehicleIsolation() async throws {
-        let (_, directory) = try makeStore()
-        let car = vehicle(odometer: 1050)
-        let other = vehicle(odometer: 2000)
-        let first = datedTrip(car, day: 1, distance: 50)
-        var legacy = AppData()
-        legacy.vehicles = [car, other]
-        legacy.trips = [first]
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let url = directory.appendingPathComponent("data.json")
-        try encoder.encode(legacy).write(to: url)
-        let store = AppStore(fileURL: url)
-        XCTAssertTrue(store.deleteTrip(id: first.id))
-        XCTAssertEqual(store.data.vehicles.first(where: { $0.id == car.id })?.odometer, 1000)
-        XCTAssertEqual(store.data.vehicles.first(where: { $0.id == other.id })?.odometer, 2000)
-    }
-
-    @MainActor func testFuelWithoutOdoDoesNotResetVehicle() async throws {
+    @MainActor func testManualAndOdoRecordsUseSameDeltaRule() async throws {
         let (store, _) = try makeStore()
         let car = vehicle()
         XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, distance: 30)))
-        XCTAssertTrue(store.addFuel(fuel(car, day: 2, odometer: 0)))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1030)
-    }
-
-    @MainActor func testAtomicReplacementDoesNotDropEditedRecordWhenValidationFails() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        let first = datedTrip(car, day: 1, distance: 30)
-        let second = datedTrip(car, day: 2, distance: 20)
-        [first, second, datedTrip(car, day: 3, odometer: 1100)].forEach { XCTAssertTrue(store.addTrip($0)) }
-        var replacement = first
-        replacement.distance = 150
-        XCTAssertFalse(store.replaceTrip(replacement, removing: second.id))
-        XCTAssertEqual(store.data.trips.count, 3)
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-    }
-
-    @MainActor func testDecimalDistancesDoNotRejectAnEqualOdoDueToRounding() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle(odometer: 0)
-        XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, distance: 0.1)))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 2, distance: 0.2)))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 3, odometer: 0.3)))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 0.3)
-        XCTAssertEqual(store.data.trips.last?.distance, 0)
-    }
-
-    @MainActor func testMixedHistoryRemainsConsistentAfterBackupRestoreAndFurtherEdits() async throws {
-        let (source, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(source.addVehicle(car))
-        var manual = datedTrip(car, day: 1, distance: 30)
-        let measured = datedTrip(car, day: 2, odometer: 1100)
-        XCTAssertTrue(source.addTrip(manual))
-        XCTAssertTrue(source.addTrip(measured))
-        let backup = try export(source)
-        let (destination, _) = try makeStore()
-        try destination.restore(from: backup)
-        manual.distance = 40
-        XCTAssertTrue(destination.updateTrip(manual))
-        XCTAssertEqual(destination.data.trips.first(where: { $0.id == measured.id })?.distance, 60)
-        XCTAssertEqual(destination.selectedVehicle?.odometer, 1100)
-        XCTAssertTrue(destination.deleteTrip(id: measured.id))
-        XCTAssertEqual(destination.selectedVehicle?.odometer, 1040)
-    }
-
-    @MainActor func testVehicleSettingCorrectionCanReduceManualDriftWithoutRewritingTrips() async throws {
-        let (store, _) = try makeStore()
-        let car = vehicle()
-        XCTAssertTrue(store.addVehicle(car))
-        let manual = datedTrip(car, day: 1, distance: 120)
+        var manual = distanceTrip(car, distance: 30)
+        let measured = trip(car)
         XCTAssertTrue(store.addTrip(manual))
-        XCTAssertTrue(store.updateVehicle(car, correctedOdometer: 1100, correctionDate: Date(timeIntervalSince1970: 2 * 86400)))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-        XCTAssertEqual(store.data.trips.first?.distance, 120)
-        XCTAssertEqual(store.selectedVehicle?.odometerCorrections?.first?.adjustment, -20)
-        let measured = datedTrip(car, day: 3, odometer: 1150)
         XCTAssertTrue(store.addTrip(measured))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 50)
+        XCTAssertEqual(store.data.trips.last?.distance, 70)
+        manual.distance = 40
+        XCTAssertTrue(store.updateTrip(manual))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1110)
+        XCTAssertEqual(store.data.trips.last?.distance, 70)
+        XCTAssertTrue(store.deleteTrip(id: measured.id))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1040)
+        XCTAssertTrue(store.deleteTrip(id: manual.id))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
+    }
+
+    @MainActor func testDateOnlyEditDoesNotChangeMileageOrOtherRecords() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        var record = distanceTrip(car, distance: 30)
+        XCTAssertTrue(store.addTrip(record))
+        let measured = trip(car)
+        XCTAssertTrue(store.addTrip(measured))
+        let later = try XCTUnwrap(store.data.trips.last)
+        record.date = Date.distantFuture
+        record.note = "Moved date only"
+        XCTAssertTrue(store.updateTrip(record))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
+        XCTAssertEqual(store.data.trips.last, later)
+    }
+
+    @MainActor func testBackdatedNewOdoStillUsesCurrentVehicleValue() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        XCTAssertTrue(store.addTrip(trip(car)))
+        var backdated = trip(car, odometer: 1150)
+        backdated.date = Date.distantPast
+        XCTAssertTrue(store.addTrip(backdated))
+        XCTAssertEqual(store.data.trips.last?.distance, 50)
         XCTAssertEqual(store.selectedVehicle?.odometer, 1150)
     }
 
-    @MainActor func testCorrectionEditsAndDeletionRecalculateFollowingOdoDistance() async throws {
+    @MainActor func testSettingVehicleOdoDirectlyKeepsDistancesAndFutureEditsUseDeltas() async throws {
         let (store, _) = try makeStore()
-        let car = vehicle()
+        var car = vehicle()
         XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, distance: 30)))
-        XCTAssertTrue(store.updateVehicle(car, correctedOdometer: 1040, correctionDate: Date(timeIntervalSince1970: 2 * 86400)))
-        let measured = datedTrip(car, day: 3, odometer: 1100)
-        XCTAssertTrue(store.addTrip(measured))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 60)
-        var correction = try XCTUnwrap(store.selectedVehicle?.odometerCorrections?.first)
-        correction.odometer = 1050
-        XCTAssertTrue(store.updateOdometerCorrection(vehicleID: car.id, correction: correction))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 50)
-        XCTAssertTrue(store.deleteOdometerCorrection(vehicleID: car.id, id: correction.id))
-        XCTAssertEqual(store.data.trips.first(where: { $0.id == measured.id })?.distance, 70)
+        var record = distanceTrip(car, distance: 100)
+        XCTAssertTrue(store.addTrip(record))
+        car.odometer = 1050
+        XCTAssertTrue(store.updateVehicle(car))
+        XCTAssertEqual(store.data.trips.first?.distance, 100)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1050)
+        record.distance = 120
+        XCTAssertTrue(store.updateTrip(record))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1070)
+        XCTAssertTrue(store.deleteTrip(id: record.id))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 950)
+        XCTAssertTrue(store.addTrip(trip(car, odometer: 1100)))
+        XCTAssertEqual(store.data.trips.last?.distance, 150)
         XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
     }
 
-    @MainActor func testCorrectionCannotConcealAnEarlierIncorrectMeasuredOdo() async throws {
+    @MainActor func testFuelEditsAndDeletionDoNotChangeVehicleOdoOrTripDistances() async throws {
         let (store, _) = try makeStore()
         let car = vehicle()
         XCTAssertTrue(store.addVehicle(car))
-        XCTAssertTrue(store.addTrip(datedTrip(car, day: 1, odometer: 1100)))
-        XCTAssertFalse(store.updateVehicle(car, correctedOdometer: 1090, correctionDate: Date(timeIntervalSince1970: 2 * 86400)))
-        XCTAssertEqual(store.selectedVehicle?.odometer, 1100)
-        XCTAssertTrue(store.selectedVehicle?.odometerCorrections?.isEmpty ?? true)
+        XCTAssertTrue(store.addTrip(distanceTrip(car, distance: 30)))
+        let tripsBefore = store.data.trips
+        var fill = fuel(car, day: 2, odometer: 1100)
+        XCTAssertTrue(store.addFuel(fill))
+        fill.odometer = 1200
+        XCTAssertTrue(store.updateFuel(fill))
+        XCTAssertTrue(store.deleteFuel(id: fill.id))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1030)
+        XCTAssertEqual(store.data.trips, tripsBefore)
     }
 
-    @MainActor func testCorrectionAndTrailingManualDistanceSurviveBackupAndReload() async throws {
-        let (source, _) = try makeStore()
+    @MainActor func testRepeatedDeletionDoesNotSubtractTwice() async throws {
+        let (store, _) = try makeStore()
         let car = vehicle()
-        XCTAssertTrue(source.addVehicle(car))
-        XCTAssertTrue(source.updateVehicle(car, correctedOdometer: 1050, correctionDate: Date(timeIntervalSince1970: 86400)))
-        XCTAssertTrue(source.addTrip(datedTrip(car, day: 2, distance: 20)))
-        let backup = try export(source)
-        let (destination, directory) = try makeStore()
-        try destination.restore(from: backup)
-        XCTAssertEqual(destination.selectedVehicle?.odometer, 1070)
-        let reloaded = AppStore(fileURL: directory.appendingPathComponent("data.json"))
-        XCTAssertEqual(reloaded.selectedVehicle?.odometer, 1070)
-        let correction = try XCTUnwrap(reloaded.selectedVehicle?.odometerCorrections?.first)
-        XCTAssertTrue(reloaded.deleteOdometerCorrection(vehicleID: car.id, id: correction.id))
-        XCTAssertEqual(reloaded.selectedVehicle?.odometer, 1020)
+        XCTAssertTrue(store.addVehicle(car))
+        let record = distanceTrip(car, distance: 30)
+        XCTAssertTrue(store.addTrip(record))
+        XCTAssertTrue(store.deleteTrip(id: record.id))
+        XCTAssertFalse(store.deleteTrip(id: record.id))
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
+    }
+
+    @MainActor func testInvalidNewOdoDoesNotChangeDataOrDisk() async throws {
+        let (store, directory) = try makeStore()
+        let car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        let before = try Data(contentsOf: directory.appendingPathComponent("data.json"))
+        XCTAssertFalse(store.addTrip(trip(car, odometer: 900)))
+        XCTAssertFalse(store.addTrip(trip(car, odometer: 1000)))
+        XCTAssertTrue(store.data.trips.isEmpty)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1000)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("data.json")), before)
+    }
+
+    @MainActor func testNegativeResultIsRejectedWithoutPartialChanges() async throws {
+        let (store, directory) = try makeStore()
+        var car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        let record = distanceTrip(car, distance: 100)
+        XCTAssertTrue(store.addTrip(record))
+        car.odometer = 50
+        XCTAssertTrue(store.updateVehicle(car))
+        let before = try Data(contentsOf: directory.appendingPathComponent("data.json"))
+        XCTAssertFalse(store.deleteTrip(id: record.id))
+        XCTAssertEqual(store.data.trips.count, 1)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 50)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("data.json")), before)
+    }
+
+    @MainActor func testSameDayOverwriteAppliesNetChangeOnce() async throws {
+        let (store, _) = try makeStore()
+        let car = vehicle()
+        XCTAssertTrue(store.addVehicle(car))
+        let first = distanceTrip(car, distance: 30)
+        let edited = distanceTrip(car, distance: 40, day: 2)
+        XCTAssertTrue(store.addTrip(first))
+        XCTAssertTrue(store.addTrip(edited))
+        var replacement = first
+        replacement.distance = -1
+        XCTAssertFalse(store.replaceTrip(replacement, removing: edited.id))
+        XCTAssertEqual(store.data.trips.count, 2)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1070)
+        replacement.distance = 50
+        XCTAssertTrue(store.replaceTrip(replacement, removing: edited.id))
+        XCTAssertEqual(store.data.trips.count, 1)
+        XCTAssertEqual(store.selectedVehicle?.odometer, 1050)
+    }
+
+    @MainActor func testLegacyDataAndBackupPreserveSavedMileageWithoutRecalculation() async throws {
+        let (_, directory) = try makeStore()
+        var car = vehicle(odometer: 1050)
+        car.initialOdometer = 500
+        car.odometerCorrections = [OdometerCorrection(date: Date(), odometer: 1400)]
+        var legacy = AppData()
+        legacy.vehicles = [car]
+        // The retained ODO is intentionally different from today's vehicle value.
+        legacy.trips = [trip(car, odometer: 1100, distance: 80)]
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let url = directory.appendingPathComponent("data.json")
+        let raw = try encoder.encode(legacy)
+        try raw.write(to: url)
+        let loaded = AppStore(fileURL: url)
+        XCTAssertEqual(loaded.selectedVehicle?.odometer, 1050)
+        XCTAssertEqual(loaded.data.trips.first?.distance, 80)
+        XCTAssertEqual(try Data(contentsOf: url), raw)
+        let backup = try export(loaded)
+        let (restored, _) = try makeStore()
+        try restored.restore(from: backup)
+        XCTAssertEqual(restored.selectedVehicle?.odometer, 1050)
+        XCTAssertEqual(restored.data.trips.first?.distance, 80)
+        XCTAssertEqual(restored.selectedVehicle?.odometerCorrections?.first?.odometer, 1400)
+        XCTAssertTrue(restored.deleteTrip(id: legacy.trips[0].id))
+        XCTAssertEqual(restored.selectedVehicle?.odometer, 970)
+    }
+
+    @MainActor func testChangingOneVehicleDoesNotChangeAnother() async throws {
+        let (store, _) = try makeStore()
+        let first = vehicle()
+        let second = vehicle(odometer: 2000)
+        XCTAssertTrue(store.addVehicle(first))
+        XCTAssertTrue(store.addVehicle(second))
+        let record = distanceTrip(first, distance: 30)
+        XCTAssertTrue(store.addTrip(record))
+        XCTAssertTrue(store.deleteTrip(id: record.id))
+        XCTAssertEqual(store.data.vehicles.map(\.odometer), [1000, 2000])
+    }
+
+    @MainActor func testDecimalSubtractionCanReturnToZero() async throws {
+        let (store, _) = try makeStore()
+        var car = vehicle(odometer: 0)
+        XCTAssertTrue(store.addVehicle(car))
+        let first = distanceTrip(car, distance: 0.1)
+        let second = distanceTrip(car, distance: 0.2, day: 2)
+        XCTAssertTrue(store.addTrip(first))
+        XCTAssertTrue(store.addTrip(second))
+        car.odometer = 0.3
+        XCTAssertTrue(store.updateVehicle(car))
+        XCTAssertTrue(store.deleteTrip(id: first.id))
+        XCTAssertTrue(store.deleteTrip(id: second.id))
+        XCTAssertEqual(try XCTUnwrap(store.selectedVehicle?.odometer), 0, accuracy: 0.000000001)
+    }
+
+    @MainActor func testFailedPersistenceDoesNotApplyVehicleOrMileageChange() async throws {
+        let (_, directory) = try makeStore()
+        let store = AppStore(fileURL: directory.appendingPathComponent("missing/data.json"))
+        XCTAssertFalse(store.addVehicle(vehicle()))
+        XCTAssertTrue(store.data.vehicles.isEmpty)
+        XCTAssertNotNil(store.lastError)
     }
 }
